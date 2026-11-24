@@ -405,6 +405,7 @@ impl Gfx {
         pointer: (f32, f32, f32),
         lum: f32,
         time: f32,
+        live: bool,
     ) {
         let g = &self.glass;
         self.use_prog(g, surf);
@@ -422,6 +423,7 @@ impl Gfx {
         self.u3(g, "u_pointer", pointer.0, pointer.1, pointer.2);
         self.u1(g, "u_lum", lum);
         self.u1(g, "u_time", time);
+        self.u1(g, "u_live", if live { 1.0 } else { 0.0 });
         self.quad(
             quad_rect[0],
             quad_rect[1],

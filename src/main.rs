@@ -546,7 +546,7 @@ impl App {
             Some(output),
         );
         layer.set_anchor(Anchor::BOTTOM);
-        layer.set_exclusive_zone(-1);
+        layer.set_exclusive_zone(self.exclusive_zone());
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         let mut layout = Layout::new();
         self.rebuild_slots_for(&mut layout);
@@ -731,6 +731,17 @@ impl App {
         layout.slots = slots;
         layout.zoom = self.settings.zoom;
         layout.magnify = self.settings.magnification;
+        layout.auto_hide = self.settings.auto_hide;
+    }
+
+    /// Space the dock reserves at the bottom of each monitor: none while it hides itself (-1 also
+    /// keeps it clear of other surfaces' zones), the resting panel plus its gap when always shown.
+    fn exclusive_zone(&self) -> i32 {
+        if self.settings.auto_hide {
+            -1
+        } else {
+            (dock::PANEL_H + dock::BOTTOM_GAP).ceil() as i32
+        }
     }
 
     /// Gives one point to every app that opened a window since the last refresh.
@@ -784,9 +795,21 @@ impl App {
         self.usage = usage::Usage::load(&usage::Usage::default_path());
         if new != self.settings {
             dbg_log(&format!("settings changed: {new:?}"));
+            let hide_changed = new.auto_hide != self.settings.auto_hide;
             self.settings = new;
+            if hide_changed {
+                let zone = self.exclusive_zone();
+                for v in &self.views {
+                    v.layer.set_exclusive_zone(zone);
+                    v.layer.commit();
+                }
+            }
         }
         self.refresh();
+        // Showing or hiding for good is an animation the pointer did not start: kick it off.
+        for vi in 0..self.views.len() {
+            self.request_redraw(vi);
+        }
     }
 
     fn drag_active(&self) -> bool {
@@ -1116,6 +1139,7 @@ impl App {
                     ptr,
                     lum,
                     t,
+                    self.settings.live_glass,
                 );
             } else {
                 g.shape(

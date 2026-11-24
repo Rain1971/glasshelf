@@ -38,6 +38,8 @@ and numbers are clamped to their range:
 
 ```json
 {
+  "auto_hide": true,
+  "live_glass": true,
   "magnification": true,
   "zoom": 1.78,
   "recommended": true,
@@ -47,6 +49,8 @@ and numbers are clamped to their range:
 
 | Key | Default | Range | Meaning |
 | --- | --- | --- | --- |
+| `auto_hide` | `true` | | Hide the dock until the pointer touches the bottom edge. `false` keeps it visible and reserves its height (78 px) so windows are not placed under it. |
+| `live_glass` | `true` | | The compositor blurs the backdrop every frame (needs the `glassdock-live` layer rule with `blur = on` and `ignore_alpha = 0.18`); moving content shows through the glass. `false`: refracted snapshot, captured whenever the dock appears. A smaller `decoration:blur:size` (e.g. 4 with 2 passes) keeps more detail visible. |
 | `magnification` | `true` | | Icons grow under the pointer. |
 | `zoom` | `1.78` | 1.25 to 2.0 | Peak magnification. A lower value also makes the dock surface shorter. |
 | `recommended` | `true` | | Show the recommended apps after the divider. |

@@ -100,6 +100,8 @@ pub struct Layout {
     pub zoom: f32,
     /// Magnification on or off.
     pub magnify: bool,
+    /// Hide when the pointer leaves (see `config::Settings::auto_hide`); false keeps it visible.
+    pub auto_hide: bool,
     pub drag: Option<DragState>,
     /// Visual offsets (logical px) of slots that just changed place; they decay to zero.
     pub shift: HashMap<String, f32>,
@@ -124,6 +126,7 @@ impl Layout {
             capture_wait_until: None,
             zoom: ZOOM,
             magnify: true,
+            auto_hide: true,
             drag: None,
             shift: HashMap::new(),
         };
@@ -218,7 +221,8 @@ impl Layout {
     }
 
     pub fn want_visible(&self, now: Instant) -> bool {
-        self.pointer.is_some()
+        !self.auto_hide
+            || self.pointer.is_some()
             || self.menu_open
             || self.forced_visible
             || self.manual_until.is_some_and(|t| now < t)
@@ -611,6 +615,18 @@ mod tests {
             "the hot zone must be at least as wide as the resting dock"
         );
         assert!(x >= 0 && (x + w) as f32 <= l.w);
+    }
+
+    #[test]
+    fn without_auto_hide_the_dock_stays_visible() {
+        let mut l = Layout::new();
+        l.auto_hide = false;
+        let t0 = Instant::now();
+        assert!(l.want_visible(t0), "no pointer, no menu: still wanted");
+        for i in 1..=60 {
+            l.step(1.0 / 60.0, t0 + Duration::from_millis(i * 16), false, false);
+        }
+        assert!(l.reveal > 0.99);
     }
 
     #[test]

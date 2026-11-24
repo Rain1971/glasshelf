@@ -177,6 +177,8 @@ open "GlassDock Settings" from your launcher. Changes apply immediately.
 
 | Setting | Default | |
 | --- | --- | --- |
+| Hide automatically | on | The dock slides in at the bottom edge. Off: it stays visible and windows make room for it. |
+| Live glass | on | Hyprland blurs what is behind the dock every frame, so moving content shows through. Needs the `glassdock-live` layer rule from [`config/hyprland.conf.example`](config/hyprland.conf.example). Off: the lensed refraction of a snapshot taken when the dock appears. |
 | Magnification | on | Icons grow under the pointer. |
 | Zoom level | 1.78x | Peak size of the magnification (1.25x to 2x). |
 | Show recommended apps | on | The section described above. |

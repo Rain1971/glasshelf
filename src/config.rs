@@ -17,6 +17,12 @@ pub const RECOMMENDED_DEFAULT: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Settings {
+    /// The dock hides and slides in when the pointer touches the bottom edge. When off, it stays
+    /// visible and reserves its space on the screen (windows are not placed under it).
+    pub auto_hide: bool,
+    /// The glass shows the backdrop live (Hyprland blurs it every frame) instead of refracting a
+    /// snapshot taken when the dock appears. Needs the `glassdock` blur layer rule in Hyprland.
+    pub live_glass: bool,
     /// Icons grow under the pointer.
     pub magnification: bool,
     /// Peak icon scale of the magnification (`ZOOM_MIN..=ZOOM_MAX`).
@@ -30,6 +36,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            auto_hide: true,
+            live_glass: true,
             magnification: true,
             zoom: ZOOM_DEFAULT,
             recommended: true,
@@ -69,6 +77,12 @@ impl Settings {
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
         if let Some(o) = value.as_ref().and_then(|v| v.as_object()) {
+            if let Some(b) = o.get("auto_hide").and_then(|v| v.as_bool()) {
+                s.auto_hide = b;
+            }
+            if let Some(b) = o.get("live_glass").and_then(|v| v.as_bool()) {
+                s.live_glass = b;
+            }
             if let Some(b) = o.get("magnification").and_then(|v| v.as_bool()) {
                 s.magnification = b;
             }
@@ -221,6 +235,7 @@ mod tests {
         let s = Settings::load_from(&d.join("s.json"));
         assert!(!s.recommended);
         assert!(s.magnification);
+        assert!(s.auto_hide, "auto-hide stays on when the file does not mention it");
         assert_eq!(s.recommended_count, RECOMMENDED_DEFAULT);
     }
 
@@ -246,6 +261,8 @@ mod tests {
         let d = tmp("roundtrip");
         let p = d.join("sub").join("s.json");
         let s = Settings {
+            auto_hide: false,
+            live_glass: false,
             magnification: false,
             zoom: 1.5,
             recommended: false,
