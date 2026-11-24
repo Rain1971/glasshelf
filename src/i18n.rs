@@ -28,6 +28,19 @@ pub enum Msg {
     Unpin,
     Pin,
     AddPrompt,
+    SettingsMenu,
+    ForgetRecent,
+    SettingsTitle,
+    SecAppearance,
+    Magnification,
+    MagnificationHint,
+    Zoom,
+    SecRecommended,
+    ShowRecommended,
+    ShowRecommendedHint,
+    RecommendedCount,
+    ClearHistory,
+    HistoryCleared,
 }
 
 /// Picks a language from a locale string such as `es_ES.UTF-8`.
@@ -76,6 +89,21 @@ pub fn translate(lang: Lang, msg: Msg) -> &'static str {
         (Lang::En, Msg::Unpin) => "Remove from dock",
         (Lang::En, Msg::Pin) => "Keep in dock",
         (Lang::En, Msg::AddPrompt) => "Add to dock",
+        (Lang::En, Msg::SettingsMenu) => "Dock settings…",
+        (Lang::En, Msg::ForgetRecent) => "Remove from recommendations",
+        (Lang::En, Msg::SettingsTitle) => "GlassDock Settings",
+        (Lang::En, Msg::SecAppearance) => "Appearance",
+        (Lang::En, Msg::Magnification) => "Magnification",
+        (Lang::En, Msg::MagnificationHint) => "Icons grow as the pointer passes over them",
+        (Lang::En, Msg::Zoom) => "Zoom level",
+        (Lang::En, Msg::SecRecommended) => "Recommended apps",
+        (Lang::En, Msg::ShowRecommended) => "Show recommended apps",
+        (Lang::En, Msg::ShowRecommendedHint) => {
+            "Recently and frequently used apps that are closed and not kept in the dock"
+        }
+        (Lang::En, Msg::RecommendedCount) => "Number of recommended apps",
+        (Lang::En, Msg::ClearHistory) => "Clear usage history",
+        (Lang::En, Msg::HistoryCleared) => "History cleared",
         (Lang::Es, Msg::NewWindow) => "Nueva ventana",
         (Lang::Es, Msg::MinimizeOne) => "Minimizar",
         (Lang::Es, Msg::MinimizeAll) => "Minimizar todas",
@@ -86,6 +114,21 @@ pub fn translate(lang: Lang, msg: Msg) -> &'static str {
         (Lang::Es, Msg::Unpin) => "Quitar del dock",
         (Lang::Es, Msg::Pin) => "Fijar en el dock",
         (Lang::Es, Msg::AddPrompt) => "Añadir al dock",
+        (Lang::Es, Msg::SettingsMenu) => "Ajustes del dock…",
+        (Lang::Es, Msg::ForgetRecent) => "Quitar de recomendadas",
+        (Lang::Es, Msg::SettingsTitle) => "Ajustes de GlassDock",
+        (Lang::Es, Msg::SecAppearance) => "Apariencia",
+        (Lang::Es, Msg::Magnification) => "Ampliación",
+        (Lang::Es, Msg::MagnificationHint) => "Los iconos crecen al pasar el puntero",
+        (Lang::Es, Msg::Zoom) => "Nivel de zoom",
+        (Lang::Es, Msg::SecRecommended) => "Apps recomendadas",
+        (Lang::Es, Msg::ShowRecommended) => "Mostrar apps recomendadas",
+        (Lang::Es, Msg::ShowRecommendedHint) => {
+            "Apps usadas reciente o frecuentemente que están cerradas y no fijadas en el dock"
+        }
+        (Lang::Es, Msg::RecommendedCount) => "Número de apps recomendadas",
+        (Lang::Es, Msg::ClearHistory) => "Borrar historial de uso",
+        (Lang::Es, Msg::HistoryCleared) => "Historial borrado",
     }
 }
 
@@ -93,7 +136,7 @@ pub fn translate(lang: Lang, msg: Msg) -> &'static str {
 mod tests {
     use super::*;
 
-    const ALL: [Msg; 10] = [
+    const ALL: [Msg; 23] = [
         Msg::NewWindow,
         Msg::MinimizeOne,
         Msg::MinimizeAll,
@@ -104,6 +147,19 @@ mod tests {
         Msg::Unpin,
         Msg::Pin,
         Msg::AddPrompt,
+        Msg::SettingsMenu,
+        Msg::ForgetRecent,
+        Msg::SettingsTitle,
+        Msg::SecAppearance,
+        Msg::Magnification,
+        Msg::MagnificationHint,
+        Msg::Zoom,
+        Msg::SecRecommended,
+        Msg::ShowRecommended,
+        Msg::ShowRecommendedHint,
+        Msg::RecommendedCount,
+        Msg::ClearHistory,
+        Msg::HistoryCleared,
     ];
 
     #[test]

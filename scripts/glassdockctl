@@ -9,6 +9,9 @@
 #   hover  <output> <x|off>    simulate the pointer over x (logical px inside the dock surface) for 4 s
 #   menu   <output> <app-key>  open the context menu of an app (e.g. kitty.desktop)
 #   refresh                    re-read windows and desktop entries
+#   reload                     re-read settings.json (the settings window does this by itself)
+#   drag   <output> <key> <x> [hold]   drag a pinned icon to x like the mouse would (testing)
+#   dragend [output]           drop an icon that is being held with `drag ... hold`
 #   add                        open the "add app" picker (needs rofi)
 #   shader <dir>               hot-load glass.vert / glass.frag from <dir> (shader development)
 #   quit                       stop the dock (the launcher will not restart it)
@@ -18,16 +21,16 @@
 #   glassdockctl reveal eDP-1
 #   glassdockctl shader ~/src/glassdock/shaders
 #
-# The socket lives at $XDG_RUNTIME_DIR/glassdock.sock.
+# The socket is $GLASSDOCK_SOCKET, or $XDG_RUNTIME_DIR/glassdock.sock when that is not set.
 
 set -eu
 
 if [ "$#" -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
-    sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
-sock="${XDG_RUNTIME_DIR:-/tmp}/glassdock.sock"
+sock="${GLASSDOCK_SOCKET:-${XDG_RUNTIME_DIR:-/tmp}/glassdock.sock}"
 [ -S "$sock" ] || { echo "glassdockctl: no running GlassDock (missing $sock)" >&2; exit 1; }
 
 if command -v socat >/dev/null 2>&1; then

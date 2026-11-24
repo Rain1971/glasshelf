@@ -14,6 +14,8 @@
 #   <prefix>/bin/glassdock-launch   launcher that keeps it alive (use this in exec-once)
 #   <prefix>/bin/glassdockctl       control tool
 #   <prefix>/share/glassdock/       examples (Hyprland snippet, pinned.json)
+#   <prefix>/share/applications/glassdock-settings.desktop   the settings app (shows in app launchers)
+#   <prefix>/share/icons/hicolor/scalable/apps/glassdock.svg its icon
 
 set -euo pipefail
 
@@ -22,7 +24,7 @@ do_build=1
 autostart=0
 hypr_conf="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/hyprland.conf"
 
-usage() { sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
 die()   { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -39,6 +41,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+case "$prefix" in /*) ;; *) prefix="$PWD/$prefix" ;; esac   # absolute, before we change directory
 cd "$repo"
 
 # sanity checks
@@ -78,6 +81,33 @@ install -m 755 scripts/glassdockctl         "$prefix/bin/glassdockctl"
 install -m 644 config/hyprland.conf.example "$prefix/share/glassdock/hyprland.conf.example"
 install -m 644 config/pinned.example.json   "$prefix/share/glassdock/pinned.example.json"
 
+# The settings app: a launcher entry (so it shows up in rofi, the dock's "+" picker, ...) and its icon.
+install -d "$prefix/share/applications" "$prefix/share/icons/hicolor/scalable/apps"
+# Exec= needs quoting rules of the Desktop Entry spec: `%` is doubled, a path with spaces or shell
+# characters is double-quoted, and characters that cannot be expressed safely are refused.
+exec_bin="$prefix/bin/glassdock"
+case "$exec_bin" in
+    *[\"\`\$\\]*) die "the prefix may not contain a double quote, a backtick, \$ or a backslash" ;;
+esac
+exec_bin="${exec_bin//%/%%}"
+case "$exec_bin" in
+    *[[:space:]\'\<\>\~\|\&\;\*\?\#\(\)]*) exec_bin="\"$exec_bin\"" ;;
+esac
+# Plain string surgery (no sed/${//}) so `&` and `\` in the path are never special.
+while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" == *@BIN@* ]]; then
+        line="${line%%@BIN@*}${exec_bin}${line#*@BIN@}"
+    fi
+    printf '%s\n' "$line"
+done < share/applications/glassdock-settings.desktop > "$prefix/share/applications/glassdock-settings.desktop"
+chmod 644 "$prefix/share/applications/glassdock-settings.desktop"
+install -m 644 share/icons/hicolor/scalable/apps/glassdock.svg "$prefix/share/icons/hicolor/scalable/apps/glassdock.svg"
+
+case ":${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:${XDG_DATA_HOME:-$HOME/.local/share}:" in
+    *":$prefix/share:"*) ;;
+    *) warn "$prefix/share is not in XDG_DATA_DIRS: launchers will not list \"GlassDock Settings\" (run \`glassdock settings\` instead)" ;;
+esac
+
 case ":$PATH:" in
     *":$prefix/bin:"*) ;;
     *) warn "$prefix/bin is not in your PATH; use absolute paths in hyprland.conf or add it to PATH" ;;
@@ -107,6 +137,9 @@ Start it now (from inside your Hyprland session):
 
 Start it with Hyprland - add this line to your hyprland.conf (or re-run with --autostart):
     $line
+
+Settings: right-click the "+" button of the dock and choose "Dock settings...", or run
+    $prefix/bin/glassdock settings
 
 More options (monitor layout, minimize keybinds, ...): $prefix/share/glassdock/hyprland.conf.example
 EOF

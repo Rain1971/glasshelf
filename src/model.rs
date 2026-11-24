@@ -776,7 +776,7 @@ extern "C" {
     fn setsid() -> i32;
 }
 
-fn spawn_detached(argv: &[String]) -> io::Result<()> {
+pub fn spawn_detached(argv: &[String]) -> io::Result<()> {
     let Some((prog, args)) = argv.split_first() else {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty command"));
     };
@@ -1046,10 +1046,15 @@ impl Hypr {
         serde_json::from_str(self.request(req)?.trim()).ok()
     }
 
+    /// Windows as Hyprland reports them, or `None` when the query failed (timeout, bad answer):
+    /// a failure must not be mistaken for "no windows".
+    pub fn try_clients(&self) -> Option<Vec<Window>> {
+        let v = self.json_request("j/clients")?;
+        v.is_array().then(|| parse_clients(&v))
+    }
+
     pub fn clients(&self) -> Vec<Window> {
-        self.json_request("j/clients")
-            .map(|v| parse_clients(&v))
-            .unwrap_or_default()
+        self.try_clients().unwrap_or_default()
     }
 
     pub fn active_window_address(&self) -> Option<String> {
@@ -1188,6 +1193,8 @@ pub struct Entry {
     pub windows: Vec<String>,
     pub pinned: bool,
     pub active: bool,
+    /// Suggested app: not pinned, not running, but used before (see `usage.rs`).
+    pub recommended: bool,
 }
 
 fn app_icon(app: &AppInfo) -> String {
@@ -1205,6 +1212,14 @@ fn app_entry(app: &AppInfo) -> Entry {
         name: app.name.clone(),
         icon: app_icon(app),
         ..Entry::default()
+    }
+}
+
+/// Dock entry of a recommended app (closed, not pinned).
+pub fn recommended_entry(app: &AppInfo) -> Entry {
+    Entry {
+        recommended: true,
+        ..app_entry(app)
     }
 }
 
@@ -1374,6 +1389,43 @@ impl Pinned {
         }
         let item = self.list.remove(i);
         self.list.insert(j, item);
+        true
+    }
+
+    /// Puts the pinned apps in the order of `ids` (the result of dragging). Ids that are not
+    /// pinned are ignored. Pinned apps that are not in `ids` (the dock cannot show them, e.g. an
+    /// uninstalled app) are never lost and stay right after the app that preceded them, so they
+    /// come back to a sensible place when the app returns. False if the order did not change.
+    pub fn set_order(&mut self, ids: &[String]) -> bool {
+        let mut wanted: Vec<&String> = Vec::with_capacity(ids.len());
+        for id in ids {
+            if self.contains(id) && !wanted.contains(&id) {
+                wanted.push(id);
+            }
+        }
+        let mut lead: Vec<String> = Vec::new();
+        let mut tails: std::collections::HashMap<&str, Vec<String>> = std::collections::HashMap::new();
+        let mut current: Option<&str> = None;
+        for id in &self.list {
+            if wanted.contains(&id) {
+                current = Some(id.as_str());
+            } else if let Some(c) = current {
+                tails.entry(c).or_default().push(id.clone());
+            } else {
+                lead.push(id.clone());
+            }
+        }
+        let mut out = lead;
+        for id in wanted {
+            out.push(id.clone());
+            if let Some(t) = tails.remove(id.as_str()) {
+                out.extend(t);
+            }
+        }
+        if out == self.list {
+            return false;
+        }
+        self.list = out;
         true
     }
 
@@ -2154,5 +2206,37 @@ Exec=x
         assert!(!is_valid_address("0xzz"));
         assert!(!is_valid_address("5af1"));
         assert!(!is_valid_address("0x1;exec"));
+    }
+
+    #[test]
+    fn set_order_reorders_without_losing_apps() {
+        let path = std::env::temp_dir()
+            .join("glassdock-tests")
+            .join("set-order-pinned.json");
+        let mut p = Pinned::load(&path, &Catalog::from_dirs(&[], &ParseCtx::from_env()));
+        p.list = vec!["a.desktop".into(), "b.desktop".into(), "c.desktop".into()];
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(
+            !p.set_order(&ids(&["a.desktop", "b.desktop", "c.desktop"])),
+            "same order: no change"
+        );
+        assert!(p.set_order(&ids(&["c.desktop", "a.desktop", "b.desktop"])));
+        assert_eq!(p.list(), &["c.desktop", "a.desktop", "b.desktop"]);
+        // Unknown ids are ignored; pinned apps that are not listed stay where they were.
+        assert!(!p.set_order(&ids(&["zzz.desktop", "b.desktop"])));
+        assert_eq!(p.list(), &["c.desktop", "a.desktop", "b.desktop"]);
+        // An app the dock cannot show (B, uninstalled) keeps following the app it came after.
+        p.list = vec![
+            "a.desktop".into(),
+            "b.desktop".into(),
+            "c.desktop".into(),
+            "d.desktop".into(),
+        ];
+        assert!(p.set_order(&ids(&["d.desktop", "a.desktop", "c.desktop"])));
+        assert_eq!(p.list(), &["d.desktop", "a.desktop", "b.desktop", "c.desktop"]);
+        // Duplicates do not duplicate pinned apps.
+        p.list = vec!["a.desktop".into(), "b.desktop".into(), "c.desktop".into()];
+        assert!(!p.set_order(&ids(&["a.desktop", "a.desktop"])));
+        assert_eq!(p.list(), &["a.desktop", "b.desktop", "c.desktop"]);
     }
 }

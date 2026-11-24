@@ -24,6 +24,10 @@ pub const HIDE_DELAY: Duration = Duration::from_millis(450);
 pub const K_SCALE: f32 = 24.0;
 pub const K_REVEAL: f32 = 13.0;
 pub const K_LABEL: f32 = 16.0;
+/// How fast icons glide to their new place when the order changes while dragging.
+pub const K_SHIFT: f32 = 22.0;
+/// Pointer travel (logical px) before a press on an icon becomes a drag.
+pub const DRAG_THRESHOLD: f32 = 6.0;
 pub const BOUNCE_TIME: f32 = 0.55;
 pub const BOUNCE_HEIGHT: f32 = 18.0;
 pub const CAPTURE_WAIT: Duration = Duration::from_millis(350);
@@ -45,12 +49,26 @@ pub struct Slot {
     pub s: f32,
     pub x: f32,
     pub w: f32,
+    /// Pinned app: can be dragged to a new place.
+    pub draggable: bool,
 }
 
 impl Slot {
     pub fn interactive(&self) -> bool {
         self.kind != Kind::Sep
     }
+}
+
+/// An icon being dragged by the pointer.
+#[derive(Clone, Debug)]
+pub struct DragState {
+    pub key: String,
+    /// Left edge of the dragged icon (logical px), follows the pointer.
+    pub x: f32,
+    /// Pointer offset inside the icon when the drag started.
+    pub grab_dx: f32,
+    /// Order of the draggable slots when the drag started.
+    pub origin: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -78,6 +96,13 @@ pub struct Layout {
     pub bounce: HashMap<String, Instant>,
     /// Deadline while waiting for the backdrop capture to finish.
     pub capture_wait_until: Option<Instant>,
+    /// Peak magnification scale (see `config::Settings::zoom`).
+    pub zoom: f32,
+    /// Magnification on or off.
+    pub magnify: bool,
+    pub drag: Option<DragState>,
+    /// Visual offsets (logical px) of slots that just changed place; they decay to zero.
+    pub shift: HashMap<String, f32>,
 }
 
 impl Layout {
@@ -97,9 +122,22 @@ impl Layout {
             manual_until: None,
             bounce: HashMap::new(),
             capture_wait_until: None,
+            zoom: ZOOM,
+            magnify: true,
+            drag: None,
+            shift: HashMap::new(),
         };
         l.resize_for_slots();
         l
+    }
+
+    /// Peak icon scale in use: 1.0 when magnification is off.
+    pub fn eff_zoom(&self) -> f32 {
+        if self.magnify {
+            self.zoom.max(1.0)
+        } else {
+            1.0
+        }
     }
 
     pub fn rest_total(&self) -> f32 {
@@ -112,10 +150,11 @@ impl Layout {
 
     /// Computes the surface size (even width and height). Returns `true` if it changed.
     pub fn resize_for_slots(&mut self) -> bool {
-        let extra = (ZOOM - 1.0) * ICON * (ZOOM_RANGE / (ICON + GAP)) * 1.15;
+        let z = self.eff_zoom();
+        let extra = (z - 1.0) * ICON * (ZOOM_RANGE / (ICON + GAP)) * 1.15;
         let mut w = (self.rest_total() + extra).ceil() as i32 + 2 * SIDE_MARGIN as i32;
         w += w % 2;
-        let mut h = (ZOOM * ICON + PAD_TOP + PAD_BOTTOM + BOTTOM_GAP + LABEL_SPACE + 24.0).ceil() as i32;
+        let mut h = (z * ICON + PAD_TOP + PAD_BOTTOM + BOTTOM_GAP + LABEL_SPACE + 24.0).ceil() as i32;
         h += h % 2;
         let changed = (w as f32 - self.w).abs() > 0.5 || (h as f32 - self.h).abs() > 0.5;
         self.w = w as f32;
@@ -145,7 +184,7 @@ impl Layout {
         let left = self.w / 2.0 - total / 2.0;
         let mut x = left + PAD_X;
         for s in &mut self.slots {
-            s.x = x;
+            s.x = x + self.shift.get(&s.key).copied().unwrap_or(0.0);
             x += s.w + GAP;
         }
         (left, total)
@@ -239,7 +278,8 @@ impl Layout {
 
         // magnification
         let rest = self.rest_centers();
-        let zoom_on = self.pointer.is_some() && self.reveal > 0.55;
+        let zoom_on = self.magnify && self.drag.is_none() && self.pointer.is_some() && self.reveal > 0.55;
+        let zoom = self.eff_zoom();
         let u = match (zoom_on, self.pointer) {
             (true, Some((px, _))) => Some(self.pointer_to_rest(px, &rest)),
             _ => None,
@@ -253,7 +293,7 @@ impl Layout {
             if let Some(u) = u {
                 let d = (u - rest[i]).abs() / ZOOM_RANGE;
                 if d < 1.0 {
-                    ts = 1.0 + (ZOOM - 1.0) * 0.5 * (1.0 + (std::f32::consts::PI * d).cos());
+                    ts = 1.0 + (zoom - 1.0) * 0.5 * (1.0 + (std::f32::consts::PI * d).cos());
                 }
             }
             if (ts - s.s).abs() > 0.0015 {
@@ -265,7 +305,7 @@ impl Layout {
         }
 
         // name pill of the icon under the pointer
-        let hov = match (zoom_on, self.pointer) {
+        let hov = match (self.drag.is_none() && self.reveal > 0.55, self.pointer) {
             (true, Some((px, _))) => self.slot_at(px),
             _ => None,
         };
@@ -301,6 +341,15 @@ impl Layout {
             busy = true;
         }
 
+        if !self.shift.is_empty() {
+            let k = 1.0 - (-dt * K_SHIFT).exp();
+            self.shift.retain(|_, v| {
+                *v -= *v * k;
+                v.abs() > 0.25
+            });
+            busy = true;
+        }
+
         self.layout();
         StepResult { busy, start_capture }
     }
@@ -328,6 +377,102 @@ impl Layout {
             .fold(0.0f32, f32::max);
         let y0 = (top - lift - 6.0).max(0.0) as i32;
         ((left - 6.0) as i32, y0, (total + 12.0) as i32, h as i32 - y0)
+    }
+
+    fn draggable_indices(&self) -> Vec<usize> {
+        (0..self.slots.len()).filter(|&i| self.slots[i].draggable).collect()
+    }
+
+    /// Keys of the draggable slots in their current order.
+    pub fn draggable_keys(&self) -> Vec<String> {
+        self.draggable_indices()
+            .iter()
+            .map(|&i| self.slots[i].key.clone())
+            .collect()
+    }
+
+    /// Starts dragging the slot `key`, grabbed at `pointer_x`. False if it is not draggable.
+    pub fn begin_drag(&mut self, key: &str, pointer_x: f32) -> bool {
+        self.layout();
+        let Some(s) = self.slots.iter().find(|s| s.key == key && s.draggable) else {
+            return false;
+        };
+        // The icon may be magnified when the drag starts: keep the same relative grab point.
+        let frac = ((pointer_x - s.x) / s.w.max(1.0)).clamp(0.0, 1.0);
+        self.drag = Some(DragState {
+            key: key.to_string(),
+            x: s.x,
+            grab_dx: frac * ICON,
+            origin: self.draggable_keys(),
+        });
+        true
+    }
+
+    /// Moves the dragged icon with the pointer and reorders the slots around it. Returns true
+    /// if the order changed.
+    pub fn drag_to(&mut self, pointer_x: f32) -> bool {
+        let Some(mut d) = self.drag.take() else {
+            return false;
+        };
+        let idxs = self.draggable_indices();
+        let n = idxs.len();
+        let Some(cur) = idxs.iter().position(|&i| self.slots[i].key == d.key) else {
+            self.drag = Some(d);
+            return false;
+        };
+        // Resting cells: every draggable slot is an icon of width ICON, so cell k starts at
+        // left0 + k * (ICON + GAP). The cells are the same whatever the current order.
+        // Resting layout, so the cells do not depend on how magnified the icons still are.
+        let left0 = self.rest_centers()[idxs[0]] - ICON / 2.0;
+        let pitch = ICON + GAP;
+        d.x = (pointer_x - d.grab_dx).clamp(left0, left0 + (n as f32 - 1.0) * pitch);
+        let centre = d.x + ICON / 2.0;
+        let target = (((centre - left0) / pitch).floor().max(0.0) as usize).min(n - 1);
+        let moved = target != cur;
+        if moved {
+            let before: Vec<(String, f32)> = self.slots.iter().map(|s| (s.key.clone(), s.x)).collect();
+            let slot = self.slots.remove(idxs[cur]);
+            self.slots.insert(idxs[target], slot);
+            for (k, _) in &before {
+                self.shift.remove(k);
+            }
+            self.layout(); // resting positions in the new order
+            for s in &self.slots {
+                if s.key == d.key {
+                    continue;
+                }
+                if let Some((_, old_x)) = before.iter().find(|(k, _)| *k == s.key) {
+                    let off = old_x - s.x;
+                    if off.abs() > 0.1 {
+                        self.shift.insert(s.key.clone(), off);
+                    }
+                }
+            }
+        }
+        self.drag = Some(d);
+        moved
+    }
+
+    /// Drops the icon. Returns the new order of the draggable slots if it differs from the one
+    /// at the start of the drag. The dropped icon glides from where it was released.
+    pub fn end_drag(&mut self) -> Option<Vec<String>> {
+        let d = self.drag.take()?;
+        self.shift.remove(&d.key);
+        self.layout();
+        if let Some(s) = self.slots.iter().find(|s| s.key == d.key) {
+            let off = d.x - s.x;
+            if off.abs() > 0.1 {
+                self.shift.insert(d.key.clone(), off);
+            }
+        }
+        let now = self.draggable_keys();
+        (now != d.origin).then_some(now)
+    }
+
+    /// Forgets the drag without keeping the new order (the caller rebuilds the slots).
+    pub fn cancel_drag(&mut self) {
+        self.drag = None;
+        self.shift.clear();
     }
 
     pub fn bounce_offset(&self, key: &str, now: Instant) -> f32 {
@@ -359,6 +504,7 @@ mod tests {
             s: 1.0,
             x: 0.0,
             w: base,
+            draggable: kind == Kind::App,
         }
     }
 
@@ -524,5 +670,87 @@ mod tests {
         let first = l.slots[0].clone();
         assert_eq!(l.slot_at(first.x + first.w / 2.0), Some(0));
         assert_eq!(l.slot_at(-50.0), None);
+    }
+
+    #[test]
+    fn dragging_reorders_and_reports_the_new_order() {
+        let mut l = typical_layout();
+        l.layout();
+        let start = l.slots[0].x + ICON / 2.0;
+        assert!(l.begin_drag("app0", start));
+        // Far to the right: app0 ends up the last draggable slot, before the separator.
+        assert!(l.drag_to(start + 20.0 * (ICON + GAP)));
+        let keys = l.draggable_keys();
+        assert_eq!(keys.last().map(String::as_str), Some("app0"));
+        assert_eq!(keys.len(), 8);
+        assert_eq!(l.slots[8].kind, Kind::Sep, "non-draggable slots keep their place");
+        assert_eq!(l.slots[9].kind, Kind::Add);
+        let order = l.end_drag().expect("order changed");
+        assert_eq!(order[0], "app1");
+        assert_eq!(order[7], "app0");
+        assert!(l.drag.is_none());
+    }
+
+    #[test]
+    fn dragging_inside_the_own_cell_changes_nothing() {
+        let mut l = typical_layout();
+        l.layout();
+        let start = l.slots[3].x + ICON / 2.0;
+        assert!(l.begin_drag("app3", start));
+        assert!(!l.drag_to(start + 5.0));
+        assert!(l.end_drag().is_none());
+        assert!(!l.begin_drag("sep", 0.0), "separators are not draggable");
+        assert!(!l.begin_drag("add", 0.0), "the + button is not draggable");
+    }
+
+    #[test]
+    fn displaced_icons_glide_and_the_shift_decays() {
+        let mut l = typical_layout();
+        l.layout();
+        let start = l.slots[0].x + ICON / 2.0;
+        l.begin_drag("app0", start);
+        l.drag_to(start + ICON + GAP + 2.0); // one cell to the right: app1 moves left
+        assert!(
+            l.shift.get("app1").is_some_and(|v| *v > 0.0),
+            "app1 starts at its old place"
+        );
+        l.layout(); // applies the shift to the slot positions
+        let before = l.slots.iter().find(|s| s.key == "app1").unwrap().x;
+        let now = Instant::now();
+        settle(&mut l, now, 90);
+        assert!(l.shift.is_empty(), "the glide ends");
+        let after = l.slots.iter().find(|s| s.key == "app1").unwrap().x;
+        assert!(after < before, "app1 moved left to its new cell");
+    }
+
+    #[test]
+    fn dragging_disables_magnification() {
+        let mut l = typical_layout();
+        let now = Instant::now();
+        let rest = l.rest_centers();
+        l.pointer = Some((rest[3], l.h - BOTTOM_GAP - PAD_BOTTOM - 8.0));
+        l.begin_drag("app3", rest[3]);
+        settle(&mut l, now, 120);
+        assert!(l.slots.iter().all(|s| (s.s - 1.0).abs() < 0.01));
+    }
+
+    #[test]
+    fn magnification_can_be_turned_off_or_tuned() {
+        let mut l = typical_layout();
+        let now = Instant::now();
+        let h_default = l.h;
+        l.magnify = false;
+        l.resize_for_slots();
+        assert!(l.h < h_default, "no room for zoomed icons is needed");
+        let rest = l.rest_centers();
+        l.pointer = Some((rest[3], l.h - BOTTOM_GAP - PAD_BOTTOM - 8.0));
+        settle(&mut l, now, 240);
+        assert!(l.slots.iter().all(|s| (s.s - 1.0).abs() < 0.001));
+
+        l.magnify = true;
+        l.zoom = 1.4;
+        settle(&mut l, now, 240);
+        let peak = l.slots.iter().map(|s| s.s).fold(0.0f32, f32::max);
+        assert!(peak > 1.35 && peak <= 1.401, "peak {peak} follows the configured zoom");
     }
 }

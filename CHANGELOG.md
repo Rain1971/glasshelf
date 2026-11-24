@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Drag a pinned icon to reorder the dock: the other icons glide aside and the new order is saved.
+- Recommended apps: closed, unpinned apps you used recently or often appear after a divider
+  (ranked by frecency, stored in `~/.local/state/glassdock/usage.json`, seeded once from GNOME
+  Shell's app history when present). Right-click one to keep it or remove it from the suggestions.
+- `glassdock settings`: a liquid-glass settings window (also installed as "GlassDock Settings" in
+  launchers) with magnification, zoom level and the recommended-apps options, stored in
+  `~/.config/glassdock/settings.json`. The dock reloads it live (`glassdockctl reload`).
+- `GLASSDOCK_SETTINGS`, `GLASSDOCK_USAGE`, `GLASSDOCK_NAMESPACE` and `GLASSDOCK_SOCKET`.
+- Right-click the `+` button, or any icon, for "Dock settings...".
+
+### Changed
+- A left click on an icon acts when the button is released, so a press can become a drag.
+
 ### Fixed
 - Removed a thin concentric line drawn inside the glass bevel.
 - The `+` button is now centred on the row of icons instead of sitting on the bottom line.

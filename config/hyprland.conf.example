@@ -26,3 +26,13 @@ exec-once = glassdock-launch
 # icon in the dock restores the window.
 bind = SUPER,       H, movetoworkspacesilent, special:minimized
 bind = SUPER SHIFT, H, togglespecialworkspace, minimized
+
+# --- 5. Settings window ------------------------------------------------------------------------
+# `glassdock settings` opens a fixed-size window, which Hyprland floats by itself. If your setup
+# tiles it anyway, this rule floats and centres it (Hyprland 0.53 syntax):
+# windowrule {
+#     name = glassdock-settings
+#     match:class = ^glassdock-settings$
+#     float = on
+#     center = on
+# }

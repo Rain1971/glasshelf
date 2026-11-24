@@ -3,14 +3,17 @@
 // `as_chunks` is too recent to require from users building with an older stable toolchain.
 #![allow(clippy::chunks_exact_to_as_chunks)]
 mod capture;
+mod config;
 mod dock;
 mod gfx;
 mod i18n;
 mod model;
 mod raster;
+mod settings;
+mod usage;
 
 use anyhow::{anyhow, Result};
-use dock::{Kind, Layout, Slot, ADD_BASE, BOTTOM_GAP, HIDE_DELAY, ICON, PAD_BOTTOM, PANEL_H};
+use dock::{Kind, Layout, Slot, ADD_BASE, BOTTOM_GAP, DRAG_THRESHOLD, HIDE_DELAY, ICON, PAD_BOTTOM, PANEL_H};
 use i18n::{tr, Msg};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
@@ -53,7 +56,7 @@ use smithay_client_toolkit::{
         WaylandSurface,
     },
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
@@ -87,6 +90,9 @@ enum MenuAction {
     Unpin,
     MoveLeft,
     MoveRight,
+    /// Removes a recommended app from the suggestions.
+    Forget,
+    OpenSettings,
 }
 
 #[derive(Clone, Debug)]
@@ -103,7 +109,8 @@ struct MenuItem {
 }
 
 struct Menu {
-    entry: usize,
+    /// Key of the app the menu belongs to (not an index: the entries can change while it is open).
+    key: Option<String>,
     items: Vec<MenuItem>,
     /// x, y, w, h in logical px
     rect: [f32; 4],
@@ -175,6 +182,14 @@ struct View {
     fake_until: Option<Instant>,
 }
 
+/// A left button press on an app icon, waiting to become a click (on release) or a drag.
+struct Press {
+    vi: usize,
+    key: String,
+    pos: (f32, f32),
+    draggable: bool,
+}
+
 #[derive(Clone, Copy)]
 struct ViewId(usize);
 
@@ -224,6 +239,16 @@ struct App {
     icons: HashMap<String, gfx::Tex>,
     labels: HashMap<(String, u32, bool), (gfx::Tex, i32, i32)>,
     refresh_scheduled: bool,
+    settings: config::Settings,
+    settings_stamp: Option<std::time::SystemTime>,
+    usage: usage::Usage,
+    /// Addresses of the windows already seen, to notice newly opened ones.
+    known_windows: HashSet<String>,
+    usage_ready: bool,
+    press: Option<Press>,
+    /// A refresh was requested while an icon was being dragged; it runs after the drop.
+    refresh_deferred: bool,
+    cursor_serial: u32,
     add_tx: calloop::channel::Sender<Option<String>>,
     start: Instant,
     quit: bool,
@@ -234,6 +259,14 @@ fn dbg_log(msg: &str) {
     if std::env::var_os("GLASSDOCK_DEBUG").is_some() {
         eprintln!("[glassdock] {msg}");
     }
+}
+
+/// Layer-shell namespace of the dock (what compositor rules match). Default `glassdock`.
+fn namespace() -> String {
+    std::env::var("GLASSDOCK_NAMESPACE")
+        .ok()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| "glassdock".to_string())
 }
 
 /// Where the pinned apps are stored: `$GLASSDOCK_PINNED`, otherwise
@@ -255,19 +288,25 @@ const HELP: &str = "\
 GlassDock - a liquid-glass dock for Hyprland
 
 USAGE:
-    glassdock [--help | --version]
+    glassdock                 run the dock
+    glassdock settings        open the settings window
+    glassdock --help | --version
 
-The dock takes no other arguments; it is configured through environment variables:
+The dock is configured in the settings window (settings.json) and through environment variables:
     GLASSDOCK_OUTPUTS   comma-separated monitor names to show the dock on (default: all)
     GLASSDOCK_PINNED    path of the pinned-apps JSON (default: ~/.config/glassdock/pinned.json)
     GLASSDOCK_LANG      language of the dock's menus: en or es (default: from your locale)
+    GLASSDOCK_SETTINGS  path of settings.json (default: ~/.config/glassdock/settings.json)
+    GLASSDOCK_USAGE     path of the app usage history (default: ~/.local/state/glassdock/usage.json)
+    GLASSDOCK_NAMESPACE layer-shell namespace, for compositor rules (default: glassdock)
+    GLASSDOCK_SOCKET    control socket path (default: $XDG_RUNTIME_DIR/glassdock.sock)
     GLASSDOCK_DEBUG     log input and capture events to stderr
 
 Run it through `glassdock-launch` to keep it alive, and control it with `glassdockctl`.
 ";
 
 fn main() -> Result<()> {
-    // The dock takes no arguments besides --help and --version, so only the first one matters.
+    // Only the first argument matters: --help, --version or the `settings` subcommand.
     if let Some(arg) = std::env::args().nth(1) {
         match arg.as_str() {
             "-V" | "--version" => {
@@ -278,6 +317,7 @@ fn main() -> Result<()> {
                 print!("{HELP}");
                 return Ok(());
             }
+            "settings" => return settings::run(),
             other => {
                 eprintln!("glassdock: unknown argument '{other}' (try --help)");
                 std::process::exit(2);
@@ -357,6 +397,14 @@ fn main() -> Result<()> {
         icons: HashMap::new(),
         labels: HashMap::new(),
         refresh_scheduled: false,
+        settings: config::Settings::load(),
+        settings_stamp: config::Settings::stamp(),
+        usage: usage::Usage::load_or_seed(&usage::Usage::default_path()),
+        known_windows: HashSet::new(),
+        usage_ready: false,
+        press: None,
+        refresh_deferred: false,
+        cursor_serial: 0,
         add_tx,
         start: Instant::now(),
         quit: false,
@@ -400,6 +448,10 @@ fn main() -> Result<()> {
             if app.pinned.reload_if_changed() {
                 app.refresh();
             }
+            let stamp = config::Settings::stamp();
+            if stamp != app.settings_stamp {
+                app.reload_settings();
+            }
             TimeoutAction::ToDuration(Duration::from_secs(2))
         })
         .map_err(|e| anyhow!("timer: {e}"))?;
@@ -420,8 +472,8 @@ fn main() -> Result<()> {
         .map_err(|e| anyhow!("channel: {e}"))?;
 
     // Control socket (tests and debugging)
-    if let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR") {
-        let path = std::path::Path::new(&rt).join("glassdock.sock");
+    {
+        let path = config::socket_path();
         let _ = std::fs::remove_file(&path);
         if let Ok(listener) = UnixListener::bind(&path) {
             let _ = listener.set_nonblocking(true);
@@ -490,7 +542,7 @@ impl App {
             &self.qh,
             surface.clone(),
             Layer::Top,
-            Some("glassdock"),
+            Some(namespace()),
             Some(output),
         );
         layer.set_anchor(Anchor::BOTTOM);
@@ -548,6 +600,7 @@ impl App {
     }
 
     fn destroy_view(&mut self, v: View) {
+        self.press = None; // view indices shift when a view goes away
         if let Some(s) = v.egl_surf {
             self.egl.destroy_surface(s);
         }
@@ -637,7 +690,12 @@ impl App {
     fn rebuild_slots_for(&self, layout: &mut Layout) {
         let old: HashMap<String, f32> = layout.slots.iter().map(|s| (s.key.clone(), s.s)).collect();
         let pinned: Vec<usize> = (0..self.entries.len()).filter(|&i| self.entries[i].pinned).collect();
-        let extra: Vec<usize> = (0..self.entries.len()).filter(|&i| !self.entries[i].pinned).collect();
+        let extra: Vec<usize> = (0..self.entries.len())
+            .filter(|&i| !self.entries[i].pinned && !self.entries[i].recommended)
+            .collect();
+        let recommended: Vec<usize> = (0..self.entries.len())
+            .filter(|&i| self.entries[i].recommended)
+            .collect();
         let mut slots: Vec<Slot> = vec![];
         let mk = |kind: Kind, entry: usize, key: String, base: f32| Slot {
             kind,
@@ -647,9 +705,12 @@ impl App {
             base,
             x: 0.0,
             w: base,
+            draggable: false,
         };
         for &i in &pinned {
-            slots.push(mk(Kind::App, i, self.entries[i].key.clone(), ICON));
+            let mut sl = mk(Kind::App, i, self.entries[i].key.clone(), ICON);
+            sl.draggable = true;
+            slots.push(sl);
         }
         if !pinned.is_empty() && !extra.is_empty() {
             slots.push(mk(Kind::Sep, 0, "sep1".into(), dock::SEP_W));
@@ -657,20 +718,103 @@ impl App {
         for &i in &extra {
             slots.push(mk(Kind::App, i, self.entries[i].key.clone(), ICON));
         }
+        if !recommended.is_empty() {
+            if !pinned.is_empty() || !extra.is_empty() {
+                slots.push(mk(Kind::Sep, 0, "sepR".into(), dock::SEP_W));
+            }
+            for &i in &recommended {
+                slots.push(mk(Kind::App, i, self.entries[i].key.clone(), ICON));
+            }
+        }
         slots.push(mk(Kind::Sep, 0, "sep2".into(), dock::SEP_W));
         slots.push(mk(Kind::Add, 0, "add".into(), ADD_BASE));
         layout.slots = slots;
+        layout.zoom = self.settings.zoom;
+        layout.magnify = self.settings.magnification;
+    }
+
+    /// Gives one point to every app that opened a window since the last refresh.
+    fn track_usage(&mut self, windows: &[model::Window]) {
+        let now = usage::now_secs();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut changed = false;
+        for w in windows.iter().filter(|w| w.mapped && !w.class.is_empty()) {
+            seen.insert(w.address.clone());
+            // The very first refresh only learns which windows already exist.
+            if self.known_windows.insert(w.address.clone()) && self.usage_ready {
+                if let Some(app) = self.catalog.match_class(&w.class) {
+                    self.usage.record(&app.id, now);
+                    changed = true;
+                }
+            }
+        }
+        self.known_windows.retain(|a| seen.contains(a));
+        self.usage_ready = true;
+        if changed {
+            if let Err(e) = self.usage.save(now) {
+                eprintln!("could not save the usage history: {e}");
+            }
+        }
+    }
+
+    /// Adds the recommended apps (recent and frequent, closed, not pinned) after the entries.
+    fn append_recommended(&mut self) {
+        if !self.settings.recommended {
+            return;
+        }
+        let running: HashSet<&str> = self.entries.iter().map(|e| e.key.as_str()).collect();
+        let keys = self
+            .usage
+            .ranked(usage::now_secs(), self.settings.recommended_count as usize, |k| {
+                self.pinned.contains(k) || running.contains(k) || !self.catalog.get(k).is_some_and(|a| !a.no_display)
+            });
+        let extra: Vec<model::Entry> = keys
+            .iter()
+            .filter_map(|k| self.catalog.get(k))
+            .map(model::recommended_entry)
+            .collect();
+        self.entries.extend(extra);
+    }
+
+    /// Reads `settings.json` again and applies it (also called by `glassdockctl reload`).
+    fn reload_settings(&mut self) {
+        self.settings_stamp = config::Settings::stamp();
+        let new = config::Settings::load();
+        // The settings window can clear the history: pick up what is on disk.
+        self.usage = usage::Usage::load(&usage::Usage::default_path());
+        if new != self.settings {
+            dbg_log(&format!("settings changed: {new:?}"));
+            self.settings = new;
+        }
+        self.refresh();
+    }
+
+    fn drag_active(&self) -> bool {
+        self.views.iter().any(|v| v.layout.drag.is_some())
     }
 
     /// Re-reads windows and apps from Hyprland and rebuilds the entries.
     fn refresh(&mut self) {
         dbg_log("refresh");
         self.refresh_scheduled = false;
-        let (windows, active) = match &self.hypr {
-            Some(h) => (h.clients(), h.active_window_address()),
-            None => (vec![], None),
+        if self.drag_active() {
+            self.refresh_deferred = true; // applied when the icon is dropped
+            return;
+        }
+        self.refresh_deferred = false;
+        // `queried`: the window list is real, not an empty list standing in for a failed query.
+        let (windows, active, queried) = match &self.hypr {
+            Some(h) => match h.try_clients() {
+                Some(w) => (w, h.active_window_address(), true),
+                None => (vec![], None, false),
+            },
+            None => (vec![], None, false),
         };
         self.entries = model::build_entries(&self.catalog, self.pinned.list(), &windows, active.as_deref());
+        if queried {
+            self.track_usage(&windows);
+        }
+        self.append_recommended();
         let mons = self.hypr.as_ref().map(|h| h.monitors()).unwrap_or_default();
         for vi in 0..self.views.len() {
             let mut layout = std::mem::replace(&mut self.views[vi].layout, Layout::new());
@@ -995,6 +1139,7 @@ impl App {
         {
             let g = self.gfx.as_ref().unwrap();
             let v = &self.views[vi];
+            let drag = v.layout.drag.clone();
             for (si, s) in slots.iter().enumerate() {
                 match s.kind {
                     Kind::Sep => {
@@ -1059,6 +1204,10 @@ impl App {
                         );
                     }
                     Kind::App => {
+                        // The dragged icon is drawn last, under the pointer; its slot is the gap.
+                        if drag.as_ref().is_some_and(|d| d.key == s.key) {
+                            continue;
+                        }
                         let bounce = v.layout.bounce_offset(&s.key, now);
                         let size = s.w * scale;
                         let rect = [s.x * scale, icon_bottom - size - bounce * scale, size, size];
@@ -1098,6 +1247,26 @@ impl App {
             for (si, rect) in &lifted {
                 if let Some(t) = self.icons.get(&slots[*si].key) {
                     g.texture(surf, t, *rect, [1.0; 4], false);
+                }
+            }
+            if let Some(d) = &drag {
+                if let Some(t) = self.icons.get(&d.key) {
+                    // Lifted and a bit larger, with a soft shadow, following the pointer.
+                    let size = ICON * scale * 1.14;
+                    let cx = (d.x + ICON / 2.0) * scale;
+                    let cy = icon_bottom - ICON * scale / 2.0 - 6.0 * scale;
+                    for (grow, a) in [(9.0, 0.07), (5.5, 0.10), (2.5, 0.14)] {
+                        let r = size + 2.0 * grow * scale;
+                        g.shape(
+                            surf,
+                            [cx - r / 2.0, cy - r / 2.0 + 5.0 * scale, r, r],
+                            r * 0.24,
+                            [0.0, 0.0, 0.0, a],
+                            [0.0; 4],
+                            0.0,
+                        );
+                    }
+                    g.texture(surf, t, [cx - size / 2.0, cy - size / 2.0, size, size], [1.0; 4], false);
                 }
             }
         }
@@ -1231,10 +1400,16 @@ impl App {
     }
 
     // input handling
-    fn pointer_enter(&mut self, vi: usize, pos: (f32, f32), serial: u32) {
+    fn set_cursor(&self, shape: wp_cursor_shape_device_v1::Shape) {
         if let Some(dev) = &self.cursor_dev {
-            dev.set_shape(serial, wp_cursor_shape_device_v1::Shape::Default);
+            dev.set_shape(self.cursor_serial, shape);
         }
+    }
+
+    fn pointer_enter(&mut self, vi: usize, pos: (f32, f32), serial: u32) {
+        self.cursor_serial = serial;
+        self.press = None; // a button that was down before this Enter is not ours
+        self.set_cursor(wp_cursor_shape_device_v1::Shape::Default);
         let v = &mut self.views[vi];
         v.layout.pointer = Some(pos);
         v.menu_close_at = None;
@@ -1247,11 +1422,77 @@ impl App {
         if let Some(m) = v.menu.as_mut() {
             m.hover = m.item_at(pos.0, pos.1);
         }
+        self.drag_motion(vi, pos);
         self.request_redraw(vi);
+    }
+
+    /// A pressed draggable icon turns into a drag after DRAG_THRESHOLD px; then it follows the pointer.
+    fn drag_motion(&mut self, vi: usize, pos: (f32, f32)) {
+        let Some(pr) = self.press.as_ref().filter(|p| p.vi == vi && p.draggable) else {
+            return;
+        };
+        let (key, press_x) = (pr.key.clone(), pr.pos.0);
+        let v = &mut self.views[vi];
+        if v.layout.drag.is_none() {
+            if (pos.0 - press_x).abs() < DRAG_THRESHOLD || v.menu.is_some() {
+                return;
+            }
+            if !v.layout.begin_drag(&key, press_x) {
+                self.press = None;
+                return;
+            }
+            self.set_cursor(wp_cursor_shape_device_v1::Shape::Grabbing);
+        }
+        self.views[vi].layout.drag_to(pos.0);
+    }
+
+    /// Drops the dragged icon: saves the new order (if it changed) and rebuilds the dock.
+    fn finish_drag(&mut self, vi: usize) {
+        let order = self.views[vi].layout.end_drag();
+        self.set_cursor(wp_cursor_shape_device_v1::Shape::Default);
+        if let Some(keys) = order {
+            if self.pinned.set_order(&keys) {
+                if let Err(e) = self.pinned.save() {
+                    eprintln!("could not save the pinned apps: {e}");
+                }
+            }
+        }
+        self.refresh();
+        self.request_redraw(vi);
+    }
+
+    fn pointer_release(&mut self, vi: usize, pos: (f32, f32), button: u32) {
+        if button != BTN_LEFT {
+            return;
+        }
+        let Some(pr) = self.press.take() else {
+            return;
+        };
+        if self.views[vi].layout.drag.is_some() {
+            self.finish_drag(vi);
+            return;
+        }
+        if pr.vi != vi {
+            return;
+        }
+        // A click: the pointer must still be over the icon it went down on.
+        let layout = &self.views[vi].layout;
+        let hit = layout.slot_at(pos.0).map(|si| layout.slots[si].clone());
+        if let Some(slot) = hit.filter(|sl| sl.key == pr.key && sl.kind == Kind::App) {
+            if let Some(e) = self.entries.get(slot.entry).cloned() {
+                self.activate_entry(vi, &e);
+            }
+        }
     }
 
     fn pointer_leave(&mut self, vi: usize) {
         dbg_log(&format!("pointer_leave (reveal {:.2})", self.views[vi].layout.reveal));
+        self.press = None;
+        if self.views[vi].layout.drag.is_some() {
+            self.views[vi].layout.cancel_drag();
+            self.set_cursor(wp_cursor_shape_device_v1::Shape::Default);
+            self.refresh();
+        }
         let now = Instant::now();
         let v = &mut self.views[vi];
         v.layout.pointer = None;
@@ -1283,7 +1524,7 @@ impl App {
         if let Some(menu) = self.views[vi].menu.as_ref() {
             let hit = menu.item_at(pos.0, pos.1);
             let inside = menu.contains(pos.0, pos.1);
-            let entry = menu.entry;
+            let key = menu.key.clone();
             let action = hit.and_then(|i| match &menu.items[i].kind {
                 ItemKind::Item(a) => Some(a.clone()),
                 _ => None,
@@ -1294,7 +1535,7 @@ impl App {
             self.views[vi].menu = None;
             self.menu_released();
             if let Some(a) = action {
-                self.run_menu_action(entry, a);
+                self.run_menu_action(key, a);
             }
             return;
         }
@@ -1303,17 +1544,25 @@ impl App {
         };
         let slot = self.views[vi].layout.slots[si].clone();
         match slot.kind {
-            Kind::Add => {
-                if button == BTN_LEFT {
-                    self.add_app_dialog();
-                }
-            }
+            Kind::Add => match button {
+                BTN_LEFT => self.add_app_dialog(),
+                BTN_RIGHT => self.open_settings_menu(vi, si),
+                _ => {}
+            },
             Kind::App => {
                 let Some(e) = self.entries.get(slot.entry).cloned() else {
                     return;
                 };
                 match button {
-                    BTN_LEFT => self.activate_entry(vi, &e),
+                    // A click acts on release, so the press can still become a drag.
+                    BTN_LEFT => {
+                        self.press = Some(Press {
+                            vi,
+                            key: slot.key.clone(),
+                            pos,
+                            draggable: slot.draggable && e.pinned,
+                        });
+                    }
                     BTN_MIDDLE => self.launch_entry(vi, &e),
                     BTN_RIGHT => self.open_menu(vi, si, &e),
                     _ => {}
@@ -1386,7 +1635,10 @@ impl App {
             );
         }
         push(&mut items, "", ItemKind::Sep);
-        if e.pinned {
+        if e.recommended {
+            push(&mut items, tr(Msg::Pin), ItemKind::Item(MenuAction::Pin));
+            push(&mut items, tr(Msg::ForgetRecent), ItemKind::Item(MenuAction::Forget));
+        } else if e.pinned {
             let list = self.pinned.list();
             let idx = e.app.as_ref().and_then(|a| list.iter().position(|p| *p == a.id));
             if let Some(i) = idx {
@@ -1401,6 +1653,26 @@ impl App {
         } else if e.app.is_some() {
             push(&mut items, tr(Msg::Pin), ItemKind::Item(MenuAction::Pin));
         }
+        push(&mut items, "", ItemKind::Sep);
+        push(
+            &mut items,
+            tr(Msg::SettingsMenu),
+            ItemKind::Item(MenuAction::OpenSettings),
+        );
+        self.place_menu(vi, si, items, Some(e.key.clone()));
+    }
+
+    /// Right click on the `+` button: just the way to the settings window.
+    fn open_settings_menu(&mut self, vi: usize, si: usize) {
+        let items = vec![MenuItem {
+            label: tr(Msg::SettingsMenu).to_string(),
+            kind: ItemKind::Item(MenuAction::OpenSettings),
+        }];
+        self.place_menu(vi, si, items, None);
+    }
+
+    /// Measures `items`, puts the menu above slot `si` and shows it.
+    fn place_menu(&mut self, vi: usize, si: usize, items: Vec<MenuItem>, key: Option<String>) {
         let mut maxw = 120.0f32;
         for it in &items {
             if !matches!(it.kind, ItemKind::Sep) {
@@ -1427,7 +1699,7 @@ impl App {
         let x = (s.x + s.w / 2.0 - w / 2.0).clamp(4.0, (v.layout.w - w - 4.0).max(4.0));
         let y = (icon_top - 14.0 - h).max(4.0);
         v.menu = Some(Menu {
-            entry: s.entry,
+            key,
             items,
             rect: [x, y, w, h],
             hover: None,
@@ -1436,8 +1708,12 @@ impl App {
         self.request_redraw(vi);
     }
 
-    fn run_menu_action(&mut self, entry: usize, a: MenuAction) {
-        let Some(e) = self.entries.get(entry).cloned() else {
+    fn run_menu_action(&mut self, key: Option<String>, a: MenuAction) {
+        if matches!(a, MenuAction::OpenSettings) {
+            self.open_settings();
+            return;
+        }
+        let Some(e) = key.and_then(|k| self.entries.iter().find(|e| e.key == k).cloned()) else {
             return;
         };
         match a {
@@ -1465,6 +1741,14 @@ impl App {
                     }
                 }
             }
+            MenuAction::OpenSettings => {}
+            MenuAction::Forget => {
+                self.usage.forget(&e.key);
+                if let Err(err) = self.usage.save(usage::now_secs()) {
+                    eprintln!("could not save the usage history: {err}");
+                }
+                self.refresh();
+            }
             MenuAction::Pin | MenuAction::Unpin | MenuAction::MoveLeft | MenuAction::MoveRight => {
                 if let Some(app) = &e.app {
                     let id = app.id.clone();
@@ -1480,6 +1764,18 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// Starts the settings window (this same binary with the `settings` argument).
+    fn open_settings(&mut self) {
+        let exe = std::env::current_exe()
+            .ok()
+            .map(|p| p.to_string_lossy().trim_end_matches(" (deleted)").to_string())
+            .filter(|p| std::path::Path::new(p).exists())
+            .unwrap_or_else(|| "glassdock".to_string());
+        if let Err(e) = model::spawn_detached(&[exe, "settings".to_string()]) {
+            eprintln!("could not open the settings window: {e}");
         }
     }
 
@@ -1538,6 +1834,8 @@ impl App {
         let cmd = it.next().unwrap_or("");
         let a1 = it.next();
         let a2 = it.next();
+        let a3 = it.next();
+        let a4 = it.next();
         let now = Instant::now();
         let pick = |app: &App, name: Option<&str>| -> Vec<usize> {
             match name {
@@ -1609,6 +1907,52 @@ impl App {
             "refresh" => {
                 self.refresh();
                 "ok\n".into()
+            }
+            "dragend" => {
+                for vi in pick(self, a1) {
+                    if self.views[vi].layout.drag.is_some() {
+                        self.finish_drag(vi);
+                    }
+                }
+                "ok\n".into()
+            }
+            "reload" => {
+                self.reload_settings();
+                "ok\n".into()
+            }
+            "drag" => {
+                // drag <output> <key> <x> [hold]: drag the icon `key` to x (logical px) like the mouse does
+                // and drop it, or keep holding it (until `dragend`) to look at the drag
+                let (key, x) = (a2.unwrap_or(""), a3.and_then(|x| x.parse::<f32>().ok()));
+                let Some(x) = x else {
+                    return "usage: drag <output> <key> <x>\n".into();
+                };
+                let mut ok = false;
+                for vi in pick(self, a1) {
+                    let slot = self.views[vi]
+                        .layout
+                        .slots
+                        .iter()
+                        .find(|s| s.key == key && s.draggable)
+                        .cloned();
+                    if let Some(sl) = slot {
+                        if self.views[vi].layout.begin_drag(key, sl.x + sl.w / 2.0) {
+                            self.views[vi].layout.drag_to(x);
+                            if a4 == Some("hold") {
+                                self.views[vi].layout.manual_until = Some(now + Duration::from_secs(30));
+                                self.request_redraw(vi);
+                            } else {
+                                self.finish_drag(vi);
+                            }
+                            ok = true;
+                        }
+                    }
+                }
+                if ok {
+                    "ok\n".into()
+                } else {
+                    "not-found\n".into()
+                }
             }
             "shader" => {
                 // shader <directory containing glass.vert and glass.frag>
@@ -1818,6 +2162,7 @@ impl SeatHandler for App {
                 p.release();
             }
             self.cursor_dev = None;
+            self.press = None;
         }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
@@ -1847,6 +2192,7 @@ impl PointerHandler for App {
                 PointerEventKind::Leave { .. } => self.pointer_leave(vi),
                 PointerEventKind::Motion { .. } => self.pointer_motion(vi, pos),
                 PointerEventKind::Press { button, .. } => self.pointer_press(vi, pos, button),
+                PointerEventKind::Release { button, .. } => self.pointer_release(vi, pos, button),
                 _ => {}
             }
         }

@@ -70,6 +70,32 @@ implement that protocol keep whatever cursor the previous surface set.
 - Monitor order changing between sessions is a Hyprland layout matter; pin the positions as shown in
   [CONFIGURATION.md](CONFIGURATION.md#monitor-layout).
 
+## The settings window opens tiled (or does not float)
+
+The window asks Hyprland for a fixed size, which normally makes it float. If your layout tiles it
+anyway, add a rule (Hyprland 0.53 syntax):
+
+```ini
+windowrule {
+    name = glassdock-settings
+    match:class = ^glassdock-settings$
+    float = on
+    center = on
+}
+```
+
+## No recommended apps appear
+
+They are apps you used **and closed** that are not pinned. A new install has no history, so the
+section stays empty until you have opened a few apps (on a machine with GNOME, its app history seeds
+it the first time). Check that "Show recommended apps" is on in the settings, and that
+`~/.local/state/glassdock/usage.json` exists.
+
+## Dragging does nothing
+
+Only pinned apps can be dragged, and the press has to travel a few pixels before it becomes a drag.
+Running apps that are not pinned can be pinned from their right-click menu first.
+
 ## The `+` button does nothing
 
 It needs `rofi`. Install it (`sudo apt install rofi`, `pacman -S rofi`, ...).

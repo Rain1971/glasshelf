@@ -41,6 +41,9 @@ flowchart LR
 | `src/capture.rs` | Memfd-backed `wl_shm` buffers for `wlr-screencopy`, pixel-format conversion to RGBA, mean luminance. |
 | `src/raster.rs` | CPU rasterisation (resvg, tiny-skia, skrifa) of SVG and PNG icons and of text for labels and menus. Results are uploaded once as textures. |
 | `src/model.rs` | The desktop model: `.desktop` entries, icon theme lookup, the Hyprland IPC client (`j/clients`, event stream), the pinned-apps file and its first-run seed. |
+| `src/config.rs` | `settings.json` (load, clamp, atomic save), the config and state directories, and the client side of the control socket. Shared by the dock and the settings window. |
+| `src/usage.rs` | The app usage history behind the recommended apps: frecency scoring, persistence, one-time import from GNOME Shell's app history. |
+| `src/settings.rs` | The settings window (`glassdock settings`): an `xdg_toplevel` drawn with the same GL renderer and text rasteriser as the dock. It writes `settings.json` and sends `reload` to the dock. |
 | `src/i18n.rs` | The handful of UI strings, English and Spanish. |
 | `shaders/` | `glass.vert` and `glass.frag`, embedded into the binary and also loadable at runtime for development. |
 
@@ -61,6 +64,22 @@ therefore calls `wl_surface.set_input_region` with only the rectangle the dock c
 
 When the pointer enters the hot zone the dock reveals; when it leaves for longer than
 `HIDE_DELAY` (450 ms) it hides again.
+
+## Drag to reorder
+
+A left press on an icon only records a `Press`; the click acts on release. If the pointer travels
+more than `DRAG_THRESHOLD` (6 px) while a pinned icon is held, `Layout::begin_drag` starts a drag:
+magnification and the name pill switch off, the dragged slot becomes the gap, and the icon is drawn
+last under the pointer. `Layout::drag_to` computes which resting cell the icon is over and moves the
+slot there; the displaced icons get a decaying `shift` offset so they glide instead of jumping.
+On release `end_drag` returns the new order of the draggable slots, `Pinned::set_order` saves it,
+and the dock rebuilds. Hyprland events that arrive mid-drag are deferred until the drop.
+
+## Recommended apps
+
+`refresh()` compares the windows Hyprland reports with the ones it has seen: each new window gives
+its app a point in `Usage`. The ranked list, minus pinned and running apps, is appended to the
+entries as `recommended` entries, which `rebuild_slots_for` places after a divider.
 
 ## Frame loop
 

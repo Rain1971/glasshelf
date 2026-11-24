@@ -30,6 +30,12 @@ One small Rust binary. No GTK, no Qt, no toolkit: it draws itself with OpenGL ES
   not redraw at all: **0 % CPU** when idle.
 - **Multi-monitor.** One surface per output inside a single process, hot-plug aware, fractional
   scaling aware (`wp-fractional-scale` + `wp-viewporter`), sharp at 1.0x, 1.6x and everything in between.
+- **Drag to reorder.** Grab a pinned icon and move it: the others glide aside to make room, and the
+  new order is saved when you drop it.
+- **Recommended apps**, like the macOS Dock: a short section after the divider with the apps you
+  used recently or often that are closed and not pinned. One click launches them.
+- **Settings app.** A native-feeling liquid-glass window (`glassdock settings`, also listed in your
+  app launcher) with a toggle for the recommended apps, the magnification and its zoom level.
 - **Real window awareness.** Running apps get an indicator, clicking focuses or launches, the
   right-click menu offers new window, desktop actions, minimize, close, reorder and pin or unpin.
 - **Light on resources.** Roughly 0.2 ms of CPU per animated frame and about 80 MB resident for three
@@ -52,6 +58,13 @@ layout, so the bell does not jitter while the icons move under it.
 
 The dock is a transparent surface whose *input region* is cut down to the visible dock (or to a
 4 px strip while hidden), so it never steals clicks from windows underneath.
+
+### Drag to reorder, and recommended apps
+
+<img src="docs/assets/reorder.svg" alt="Animation: a pinned icon is lifted and dragged, the others glide aside; the recommended apps section can be switched off in the settings" width="100%">
+
+Only pinned apps can be dragged (running apps that are not pinned can be pinned from their menu). The
+recommended apps are never pinned: they come and go with your usage.
 
 ### The glass
 
@@ -117,7 +130,7 @@ Prefer to let the installer do it? `./scripts/install.sh --autostart` appends th
 timestamped backup of your config first).
 
 Other options: `--prefix /usr/local`, `--no-build`, `--hypr-conf <file>`. To remove everything:
-`./scripts/uninstall.sh` (add `--purge` to also delete your pinned apps).
+`./scripts/uninstall.sh` (add `--purge` to also delete your settings, pinned apps and usage history).
 
 ### Try it without installing
 
@@ -132,12 +145,45 @@ GLASSDOCK_BIN=target/release/glassdock scripts/glassdock-launch
 | --- | --- |
 | Push the pointer against the bottom edge, where the dock sits | The dock slides in. It hides 0.45 s after the pointer leaves. |
 | Left-click an icon | Focus the app's window (cycling if it has several) or launch it. |
-| Right-click an icon | Menu: new window, desktop actions, minimize or close (one or all windows), move left or right, pin or unpin. |
+| Drag a pinned icon | Reorder the dock. Drop it where you want it; the order is saved. |
+| Right-click an icon | Menu: new window, desktop actions, minimize or close (one or all windows), move left or right, pin or unpin, dock settings. |
+| Right-click a recommended icon | Keep it in the dock, or remove it from the recommendations. |
 | Click `+` | Pick an installed app to pin (needs `rofi`). |
+| Right-click `+` | Open the dock settings. |
 
 Pinned apps are stored in `~/.config/glassdock/pinned.json`. The first run seeds a generic set of
 apps that are actually installed on your system; edit the file or use the menu to change it.
 See [`config/pinned.example.json`](config/pinned.example.json).
+
+### Recommended apps
+
+After a divider at the right end of the dock, GlassDock suggests up to three apps (up to five in the
+settings) that are **closed, not pinned, and that you used recently or often**. Every window that
+opens gives its app a point, and points lose half of their value every week, so an app you opened an
+hour ago and an app you open every day both rank high. Only desktop-entry ids and timestamps are
+stored, in `~/.local/state/glassdock/usage.json`; nothing leaves your machine.
+
+The very first time, if GNOME Shell's app history exists on the machine
+(`~/.local/share/gnome-shell/application_state`), GlassDock starts from it so the section is not
+empty. It is read once and never written. Turn the section off in the settings, remove one app with
+its right-click menu, or clear the history in the settings window.
+
+### Settings
+
+Right-click the `+` button (or any icon) and choose **Dock settings...**, run `glassdock settings`, or
+open "GlassDock Settings" from your launcher. Changes apply immediately.
+
+<p align="center"><img src="docs/images/settings.png" alt="The GlassDock settings window: magnification, zoom level and the recommended apps options" width="460"></p>
+
+| Setting | Default | |
+| --- | --- | --- |
+| Magnification | on | Icons grow under the pointer. |
+| Zoom level | 1.78x | Peak size of the magnification (1.25x to 2x). |
+| Show recommended apps | on | The section described above. |
+| Number of recommended apps | 3 | 1 to 5. |
+
+They live in `~/.config/glassdock/settings.json`, which you can also edit by hand: the dock notices
+the change within two seconds (or run `glassdockctl reload`).
 
 ### Minimizing
 
@@ -157,13 +203,18 @@ glassdockctl quit                # stop the dock (the launcher will not restart 
 
 ## Configuration
 
-GlassDock has no config file for behaviour; everything is an environment variable (set it with
-`env = NAME,value` in `hyprland.conf`) plus the pinned-apps JSON.
+Behaviour is set in the settings window (stored in `settings.json`, see above). Paths and a few
+low-level options are environment variables (set them with `env = NAME,value` in `hyprland.conf`),
+and the pinned apps live in a JSON file.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `GLASSDOCK_OUTPUTS` | all monitors | Comma-separated monitor names to show the dock on, e.g. `eDP-1,DP-1`. |
 | `GLASSDOCK_PINNED` | `~/.config/glassdock/pinned.json` | Pinned-apps file. |
+| `GLASSDOCK_SETTINGS` | `~/.config/glassdock/settings.json` | Settings file. |
+| `GLASSDOCK_USAGE` | `~/.local/state/glassdock/usage.json` | App usage history (recommended apps). |
+| `GLASSDOCK_NAMESPACE` | `glassdock` | Layer-shell namespace, for compositor rules. |
+| `GLASSDOCK_SOCKET` | `$XDG_RUNTIME_DIR/glassdock.sock` | Control socket (`glassdockctl`, the settings window). |
 | `GLASSDOCK_LANG` | from your locale | `en` or `es`, language of the dock's own menus. |
 | `GLASSDOCK_DEBUG` | unset | Log input and capture events to stderr (or `journalctl -t glassdock`). |
 | `GLASSDOCK_BIN` | next to the launcher, then `$PATH` | Binary used by `glassdock-launch`. |
@@ -195,14 +246,16 @@ Being honest about what this is:
 - The glass shows a **snapshot** of what is behind the dock, captured while the dock is hidden. If a
   video plays behind the dock while it is open, the glass will not follow it.
 - It needs `wlr-screencopy`, so it does not run on GNOME or KDE.
-- No keyboard navigation and no drag-to-reorder yet (use "Move left / right" in the menu).
+- No keyboard navigation yet. Dragging reorders pinned apps only (it cannot pin an app by dropping
+  it on the dock yet).
+- The recommended apps need some usage before they appear (except when GNOME's history can seed them).
 - The `+` picker depends on `rofi`.
 - It has been tested by its author on one machine (Ubuntu with Hyprland 0.53). Reports from other
   setups are very welcome.
 
 ## Roadmap
 
-- [ ] Drag to reorder and drag a window to pin
+- [ ] Drop an app or window on the dock to pin it, and drag an icon out to unpin
 - [ ] Keyboard navigation and a toggle keybind
 - [ ] Optional vertical (left and right) placement
 - [ ] A TOML config file for sizes, zoom and delays
