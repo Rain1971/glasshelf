@@ -32,6 +32,10 @@ pub enum Msg {
     ForgetRecent,
     SettingsTitle,
     SecAppearance,
+    AutoHide,
+    AutoHideHint,
+    LiveGlass,
+    LiveGlassHint,
     Magnification,
     MagnificationHint,
     Zoom,
@@ -93,6 +97,10 @@ pub fn translate(lang: Lang, msg: Msg) -> &'static str {
         (Lang::En, Msg::ForgetRecent) => "Remove from recommendations",
         (Lang::En, Msg::SettingsTitle) => "GlassDock Settings",
         (Lang::En, Msg::SecAppearance) => "Appearance",
+        (Lang::En, Msg::AutoHide) => "Hide automatically",
+        (Lang::En, Msg::AutoHideHint) => "Shows when the pointer touches the bottom edge",
+        (Lang::En, Msg::LiveGlass) => "Live glass",
+        (Lang::En, Msg::LiveGlassHint) => "Shows what moves behind the dock as it happens",
         (Lang::En, Msg::Magnification) => "Magnification",
         (Lang::En, Msg::MagnificationHint) => "Icons grow as the pointer passes over them",
         (Lang::En, Msg::Zoom) => "Zoom level",
@@ -118,6 +126,10 @@ pub fn translate(lang: Lang, msg: Msg) -> &'static str {
         (Lang::Es, Msg::ForgetRecent) => "Quitar de recomendadas",
         (Lang::Es, Msg::SettingsTitle) => "Ajustes de GlassDock",
         (Lang::Es, Msg::SecAppearance) => "Apariencia",
+        (Lang::Es, Msg::AutoHide) => "Ocultar automáticamente",
+        (Lang::Es, Msg::AutoHideHint) => "Aparece al llevar el puntero al borde inferior",
+        (Lang::Es, Msg::LiveGlass) => "Cristal en vivo",
+        (Lang::Es, Msg::LiveGlassHint) => "Muestra en tiempo real lo que se mueve detrás",
         (Lang::Es, Msg::Magnification) => "Ampliación",
         (Lang::Es, Msg::MagnificationHint) => "Los iconos crecen al pasar el puntero",
         (Lang::Es, Msg::Zoom) => "Nivel de zoom",
@@ -136,7 +148,7 @@ pub fn translate(lang: Lang, msg: Msg) -> &'static str {
 mod tests {
     use super::*;
 
-    const ALL: [Msg; 23] = [
+    const ALL: [Msg; 27] = [
         Msg::NewWindow,
         Msg::MinimizeOne,
         Msg::MinimizeAll,
@@ -151,6 +163,10 @@ mod tests {
         Msg::ForgetRecent,
         Msg::SettingsTitle,
         Msg::SecAppearance,
+        Msg::AutoHide,
+        Msg::AutoHideHint,
+        Msg::LiveGlass,
+        Msg::LiveGlassHint,
         Msg::Magnification,
         Msg::MagnificationHint,
         Msg::Zoom,

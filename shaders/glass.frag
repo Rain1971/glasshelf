@@ -17,6 +17,10 @@
 //   u_backdrop     RGBA8 snapshot of the area behind the surface, mipmapped, origin top-left
 //   u_pointer      (x, y) in device px and a 0..1 strength of the hover light
 //   u_lum          mean luminance (0..1) of the backdrop behind the panel
+//   u_live         1.0 = live mode: the compositor blurs whatever is behind the surface every frame
+//                  (Hyprland layerrule blur), so the body is a translucent veil plus the lighting
+//                  instead of a refracted snapshot, and moving content stays visible. Keep the body
+//                  alpha above the layer rule's ignore_alpha and the shadow below it.
 precision highp float;
 precision highp sampler2D;
 
@@ -29,6 +33,7 @@ uniform sampler2D u_backdrop;
 uniform vec3  u_pointer;
 uniform float u_lum;
 uniform float u_time;
+uniform float u_live;
 
 in vec2 v_px;
 out vec4 o_color;
@@ -39,6 +44,11 @@ const float FOLD      = 1.05;   // peak inward sample displacement / BEVEL
 const float FOLD_K    = 2.0;    // falloff exponent of the displacement
 const float DISP      = 0.022;   // chromatic spread of the displacement (+-)
 const vec2  LIGHT     = vec2(-0.60, -0.80);  // key light direction (towards light, y down)
+// live mode: alpha of the veil over the compositor's blur, and the cap of the drop shadow. The
+// Hyprland layer rule uses ignore_alpha 0.18: the body is blurred behind, the shadow is not.
+const float LIVE_VEIL_DARK   = 0.22;
+const float LIVE_VEIL_BRIGHT = 0.28;
+const float LIVE_SHADOW_MAX  = 0.14;
 
 float sat1(float x) { return clamp(x, 0.0, 1.0); }
 float sq(float x) { return x * x; }
@@ -85,6 +95,9 @@ void main() {
         float sh = pow(1.0 - sat1(dsh / Rs), 2.4) * mix(0.34, 0.15, bright);
         float hair = (1.0 - smoothstep(0.0, 1.3 * S, d)) * mix(0.16, 0.30, bright);
         a_out = 1.0 - (1.0 - sh) * (1.0 - hair);
+        if (u_live > 0.5) {
+            a_out = min(a_out, LIVE_SHADOW_MAX);
+        }
     }
     if (cov <= 0.0) {
         float n = fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))) - 0.5;
@@ -180,6 +193,26 @@ void main() {
 
     // grain / dither
     float n = fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))) - 0.5;
+
+    if (u_live > 0.5) {
+        // ---- live glass: a veil over the compositor's real-time blur, plus the same light ----
+        vec3 veil = mix(vec3(0.15, 0.15, 0.20), vec3(0.97, 0.98, 1.0), bright);
+        float A = mix(LIVE_VEIL_DARK, LIVE_VEIL_BRIGHT, bright);
+        vec3 pm = veil * A;                                        // premultiplied veil
+        // thickness: inner shadow under the rim highlight and darker ends, as in snapshot mode
+        float shade = (0.09 + 0.10 * bright) * isd * (0.55 + 0.45 * key)
+                    + 0.11 * pow(omx, 1.8) * (0.45 + 0.55 * cnt);
+        pm *= 1.0 - shade;
+        A += shade * 0.6 * (1.0 - A);
+        // light layer (rim, glints, hover spot, fresnel, gloss) composited OVER the veil
+        float Lt = clamp(hi + 0.10 * fres * hiScale + gloss * (1.0 - 0.6 * bright) * 1.4, 0.0, 1.0);
+        vec3 lightCol = mix(vec3(1.0), vec3(0.93, 0.95, 1.0), 0.5);
+        vec4 live = vec4(lightCol * Lt + pm * (1.0 - Lt), Lt + A * (1.0 - Lt));
+        live.rgb += n * (1.6 / 255.0) * live.a;
+        o_color = live * cov + vec4(0.0, 0.0, 0.0, a_out) * (1.0 - cov);
+        return;
+    }
+
     col += n * (1.6 / 255.0);
 
     vec4 glass = vec4(clamp(col, 0.0, 1.0), 1.0);

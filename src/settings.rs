@@ -77,7 +77,7 @@ const XKB_MOD_CONTROL: u32 = 1 << 2;
 // ---------------------------------------------------------------------------------------------
 
 const WIN_W: f32 = 560.0;
-const WIN_H: f32 = 480.0;
+const WIN_H: f32 = 608.0;
 /// Matches Hyprland's `decoration:rounding` on this setup: the compositor blurs (and clips) the
 /// window with that radius, a larger one would leave blurred corners poking out of the glass.
 const WIN_RADIUS: f32 = 12.0;
@@ -163,9 +163,11 @@ enum Ctl {
     Minus,
     Plus,
     Clear,
+    AutoHide,
+    LiveGlass,
 }
 
-const CTL_COUNT: usize = 7;
+const CTL_COUNT: usize = 9;
 const ALL_CTLS: [Ctl; CTL_COUNT] = [
     Ctl::Close,
     Ctl::Magnification,
@@ -174,6 +176,8 @@ const ALL_CTLS: [Ctl; CTL_COUNT] = [
     Ctl::Minus,
     Ctl::Plus,
     Ctl::Clear,
+    Ctl::AutoHide,
+    Ctl::LiveGlass,
 ];
 
 impl Ctl {
@@ -183,14 +187,25 @@ impl Ctl {
 }
 
 // Row indices into `Layout::rows`.
-const ROW_MAG: usize = 0;
-const ROW_ZOOM: usize = 1;
-const ROW_REC: usize = 2;
-const ROW_COUNT: usize = 3;
-const ROW_CLEAR: usize = 4;
-const ROW_HEIGHTS: [f32; 5] = [ROW_HINT_H, ROW_PLAIN_H, ROW_HINT_H, ROW_PLAIN_H, ROW_BTN_H];
+const ROW_HIDE: usize = 0;
+const ROW_LIVE: usize = 1;
+const ROW_MAG: usize = 2;
+const ROW_ZOOM: usize = 3;
+const ROW_REC: usize = 4;
+const ROW_COUNT: usize = 5;
+const ROW_CLEAR: usize = 6;
+const ROW_N: usize = 7;
+const ROW_HEIGHTS: [f32; ROW_N] = [
+    ROW_HINT_H,
+    ROW_HINT_H,
+    ROW_HINT_H,
+    ROW_PLAIN_H,
+    ROW_HINT_H,
+    ROW_PLAIN_H,
+    ROW_BTN_H,
+];
 /// (first row, number of rows) of each card.
-const SECTIONS: [(usize, usize); 2] = [(ROW_MAG, 2), (ROW_REC, 3)];
+const SECTIONS: [(usize, usize); 2] = [(ROW_HIDE, 4), (ROW_REC, 3)];
 
 #[derive(Clone, Debug, PartialEq)]
 struct Layout {
@@ -199,7 +214,7 @@ struct Layout {
     close: Rect,
     heads: [Rect; 2],
     cards: [Rect; 2],
-    rows: [Rect; 5],
+    rows: [Rect; ROW_N],
     footer_y: f32,
 }
 
@@ -212,7 +227,7 @@ impl Layout {
         let mut y = TITLE_H;
         let mut heads = [Rect::default(); 2];
         let mut cards = [Rect::default(); 2];
-        let mut rows = [Rect::default(); 5];
+        let mut rows = [Rect::default(); ROW_N];
         for (si, &(first, n)) in SECTIONS.iter().enumerate() {
             heads[si] = Rect::new(cx, y, cw, SEC_HEAD_H);
             y += SEC_HEAD_H;
@@ -358,6 +373,12 @@ fn hit_test(l: &Layout, en: &Enabled, x: f32, y: f32) -> Option<Ctl> {
         return Some(Ctl::Close);
     }
     // A toggle is clickable on its whole row, which is a much bigger target than the capsule.
+    if l.rows[ROW_HIDE].contains(x, y) {
+        return Some(Ctl::AutoHide);
+    }
+    if l.rows[ROW_LIVE].contains(x, y) {
+        return Some(Ctl::LiveGlass);
+    }
     if l.rows[ROW_MAG].contains(x, y) {
         return Some(Ctl::Magnification);
     }
@@ -384,6 +405,8 @@ fn hit_test(l: &Layout, en: &Enabled, x: f32, y: f32) -> Option<Ctl> {
 fn activate(s: &mut Settings, c: Ctl) -> bool {
     let before = s.clone();
     match c {
+        Ctl::AutoHide => s.auto_hide = !s.auto_hide,
+        Ctl::LiveGlass => s.live_glass = !s.live_glass,
         Ctl::Magnification => s.magnification = !s.magnification,
         Ctl::Recommended => s.recommended = !s.recommended,
         Ctl::Minus => s.recommended_count = step_count(s.recommended_count, -1),
@@ -654,8 +677,8 @@ impl Ui {
 struct Anims {
     hover: [f32; CTL_COUNT],
     press: [f32; CTL_COUNT],
-    /// Slide position of the toggles: magnification, recommended.
-    on: [f32; 2],
+    /// Slide position of the toggles: magnification, recommended, auto-hide, live glass.
+    on: [f32; 4],
     /// 1 = enabled: zoom row, count row, minus, plus.
     en: [f32; 4],
     cleared: f32,
@@ -664,7 +687,7 @@ struct Anims {
 struct Targets {
     hover: [f32; CTL_COUNT],
     press: [f32; CTL_COUNT],
-    on: [f32; 2],
+    on: [f32; 4],
     en: [f32; 4],
     cleared: f32,
 }
@@ -683,7 +706,12 @@ fn targets(ui: &Ui) -> Targets {
     Targets {
         hover,
         press,
-        on: [f(ui.s.magnification), f(ui.s.recommended)],
+        on: [
+            f(ui.s.magnification),
+            f(ui.s.recommended),
+            f(ui.s.auto_hide),
+            f(ui.s.live_glass),
+        ],
         en: [
             f(en.zoom),
             f(ui.s.recommended),
@@ -724,7 +752,7 @@ impl Anims {
             // Faster in than out would feel jumpy; a single time constant is enough.
             go(&mut self.press[i], t.press[i], 0.045);
         }
-        for i in 0..2 {
+        for i in 0..4 {
             // About 4 time constants = the 150-200 ms slide of the brief.
             go(&mut self.on[i], t.on[i], 0.045);
         }
@@ -760,6 +788,8 @@ fn parse_ctl(s: &str) -> Option<Ctl> {
         "4" | "minus" => Some(Ctl::Minus),
         "5" | "plus" => Some(Ctl::Plus),
         "6" | "clear" => Some(Ctl::Clear),
+        "7" | "hide" | "autohide" => Some(Ctl::AutoHide),
+        "8" | "live" => Some(Ctl::LiveGlass),
         _ => None,
     }
 }
@@ -1341,6 +1371,8 @@ impl Renderer {
         let dim = |e: f32| 1.0 - 0.58 * (1.0 - e);
         // Rows: (row, label, hint, dimming)
         let rows = [
+            (ROW_HIDE, Msg::AutoHide, Some(Msg::AutoHideHint), 1.0),
+            (ROW_LIVE, Msg::LiveGlass, Some(Msg::LiveGlassHint), 1.0),
             (ROW_MAG, Msg::Magnification, Some(Msg::MagnificationHint), 1.0),
             (ROW_ZOOM, Msg::Zoom, None, dim(an.en[0])),
             (ROW_REC, Msg::ShowRecommended, Some(Msg::ShowRecommendedHint), 1.0),
@@ -1397,6 +1429,8 @@ impl Renderer {
         }
 
         // Toggles.
+        self.draw_toggle(cv, &l.rows[ROW_HIDE], an.on[2], Ctl::AutoHide, an, 1.0);
+        self.draw_toggle(cv, &l.rows[ROW_LIVE], an.on[3], Ctl::LiveGlass, an, 1.0);
         self.draw_toggle(cv, &l.rows[ROW_MAG], an.on[0], Ctl::Magnification, an, 1.0);
         self.draw_toggle(cv, &l.rows[ROW_REC], an.on[1], Ctl::Recommended, an, 1.0);
 
@@ -2644,7 +2678,7 @@ mod tests {
     fn separators_sit_between_rows_of_one_card() {
         let l = lay();
         let seps = l.separators();
-        assert_eq!(seps.len(), 3);
+        assert_eq!(seps.len(), 5);
         for s in seps {
             assert!(l.cards.iter().any(|c| s.y > c.y && s.bottom() < c.bottom()));
         }

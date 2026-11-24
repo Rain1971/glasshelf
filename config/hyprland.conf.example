@@ -36,3 +36,13 @@ bind = SUPER SHIFT, H, togglespecialworkspace, minimized
 #     float = on
 #     center = on
 # }
+
+# --- 6. Live glass -----------------------------------------------------------------------------
+# With "Live glass" on (the default), the compositor blurs what is behind the dock every frame, so
+# moving content shows through it. The shader keeps the body above ignore_alpha and the shadow below.
+layerrule {
+    name = glassdock-live
+    match:namespace = ^(glassdock)$
+    blur = on
+    ignore_alpha = 0.18
+}
