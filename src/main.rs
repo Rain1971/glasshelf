@@ -1804,6 +1804,8 @@ impl App {
     }
 
     fn add_app_dialog(&mut self) {
+        // Re-scan the .desktop files so apps installed after the dock started show up.
+        self.catalog = model::Catalog::load();
         let pinned: Vec<String> = self.pinned.list().to_vec();
         let apps: Vec<(String, String, String)> = self
             .catalog
