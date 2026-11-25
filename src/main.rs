@@ -177,7 +177,7 @@ struct View {
     layout: Layout,
     menu: Option<Menu>,
     menu_close_at: Option<Instant>,
-    region_sig: Option<(i32, i32, i32, i32)>,
+    region_sig: Option<Vec<(i32, i32, i32, i32)>>,
     draws: u64,
     fake_until: Option<Instant>,
 }
@@ -237,6 +237,10 @@ struct App {
     theme: raster::IconTheme,
     text: Option<raster::TextRenderer>,
     icons: HashMap<String, gfx::Tex>,
+    /// Side of the icon textures: enough for the peak zoom on a HiDPI monitor (see `icon_px_for`).
+    icon_px: u32,
+    /// The textures in `icons` were made for another `icon_px`: reload them all.
+    icons_stale: bool,
     labels: HashMap<(String, u32, bool), (gfx::Tex, i32, i32)>,
     refresh_scheduled: bool,
     settings: config::Settings,
@@ -367,6 +371,8 @@ fn main() -> Result<()> {
     let hypr = model::Hypr::new();
     let (add_tx, add_rx) = calloop::channel::channel::<Option<String>>();
 
+    let settings = config::Settings::load();
+
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
@@ -395,9 +401,11 @@ fn main() -> Result<()> {
         theme: raster::IconTheme::detect(),
         text: raster::TextRenderer::new(),
         icons: HashMap::new(),
+        icon_px: icon_px_for(settings.zoom),
+        icons_stale: false,
         labels: HashMap::new(),
         refresh_scheduled: false,
-        settings: config::Settings::load(),
+        settings,
         settings_stamp: config::Settings::stamp(),
         usage: usage::Usage::load_or_seed(&usage::Usage::default_path()),
         known_windows: HashSet::new(),
@@ -553,6 +561,7 @@ impl App {
         // Without this a dock that starts on an empty desktop stays hidden until the next event.
         let mons = self.hypr.as_ref().map(|h| h.monitors()).unwrap_or_default();
         layout.forced_visible = self.monitor_is_empty(&mons, &name);
+        layout.max_w = out_size.0 as f32;
         layout.resize_for_slots();
         layer.set_size(layout.w as u32, layout.h as u32);
         let id = self.view_serial;
@@ -800,6 +809,12 @@ impl App {
             dbg_log(&format!("settings changed: {new:?}"));
             let hide_changed = new.auto_hide != self.settings.auto_hide;
             self.settings = new;
+            // A bigger zoom needs sharper icon textures (and a smaller one frees memory).
+            let px = icon_px_for(self.settings.zoom);
+            if px != self.icon_px {
+                self.icon_px = px;
+                self.icons_stale = true; // sync_icons swaps them once a GL context is current
+            }
             if hide_changed {
                 let zone = self.exclusive_zone();
                 for v in &self.views {
@@ -809,6 +824,8 @@ impl App {
             }
         }
         self.refresh();
+        // refresh() is put off during a drag; the icons must not wait for the drop.
+        self.sync_icons();
         // Showing or hiding for good is an animation the pointer did not start: kick it off.
         for vi in 0..self.views.len() {
             self.request_redraw(vi);
@@ -884,11 +901,17 @@ impl App {
             return;
         }
         let gfx = self.gfx.as_ref().unwrap();
+        if self.icons_stale {
+            for (_, t) in self.icons.drain() {
+                gfx.delete_tex(t);
+            }
+            self.icons_stale = false;
+        }
         for e in &self.entries {
             if self.icons.contains_key(&e.key) {
                 continue;
             }
-            if let Some(b) = raster::load_icon(&self.theme, &e.icon, 256) {
+            if let Some(b) = raster::load_icon(&self.theme, &e.icon, self.icon_px) {
                 if let Ok(t) = gfx.upload_rgba(b.w as i32, b.h as i32, &b.rgba, true) {
                     self.icons.insert(e.key.clone(), t);
                 }
@@ -1078,28 +1101,36 @@ impl App {
     fn update_region(&mut self, vi: usize) {
         let menu_rect = self.views[vi].menu.as_ref().map(|m| m.rect);
         let v = &mut self.views[vi];
-        let (mut x, mut y, mut w, mut h) = v.layout.input_rect();
+        let mut rects = v.layout.input_rects();
         if let Some(m) = menu_rect {
+            // The menu joins the panel's rect (first one), so going from an icon up to the
+            // menu never crosses a gap; with the dock hidden it is a rect of its own.
+            let i = if rects.len() > 1 { 0 } else { rects.len() };
+            let (x, y, w, h) = if i < rects.len() { rects[i] } else { (m[0] as i32, m[1] as i32, 0, 0) };
             let x0 = x.min(m[0] as i32 - 4);
             let y0 = y.min(m[1] as i32 - 4);
             let x1 = (x + w).max((m[0] + m[2]) as i32 + 4);
             let y1 = (y + h).max((m[1] + m[3]) as i32 + 4);
-            x = x0;
-            y = y0;
-            w = x1 - x0;
-            h = y1 - y0;
+            let r = (x0, y0, x1 - x0, y1 - y0);
+            if i < rects.len() {
+                rects[i] = r;
+            } else {
+                rects.push(r);
+            }
         }
-        let sig = (x, y, w, h);
-        if v.region_sig == Some(sig) {
+        if v.region_sig.as_ref() == Some(&rects) {
             return;
         }
+        let sig = rects.clone();
         dbg_log(&format!(
             "input region {:?} -> {:?} (reveal {:.2})",
             v.region_sig, sig, v.layout.reveal
         ));
         v.region_sig = Some(sig);
         if let Ok(r) = Region::new(&self.compositor) {
-            r.add(x, y, w.max(1), h.max(1));
+            for &(x, y, w, h) in &rects {
+                r.add(x, y, w.max(1), h.max(1));
+            }
             v.layer.wl_surface().set_input_region(Some(r.wl_region()));
         }
     }
@@ -2042,7 +2073,11 @@ impl App {
                         .unwrap_or_else(|| "null".into());
                     let reg = v
                         .region_sig
-                        .map(|r| format!("[{},{},{},{}]", r.0, r.1, r.2, r.3))
+                        .as_ref()
+                        .map(|rs| {
+                            let v: Vec<String> = rs.iter().map(|r| format!("[{},{},{},{}]", r.0, r.1, r.2, r.3)).collect();
+                            format!("[{}]", v.join(","))
+                        })
                         .unwrap_or_else(|| "null".into());
                     s.push_str(&format!(
                         "    {{\"name\":\"{}\",\"reveal\":{:.3},\"scale\":{:.3},\"buf\":[{},{}],\"surface\":[{},{}],\"draws\":{},\"busy\":{},\"frame_pending\":{},\"lum\":{:.3},\"backdrop\":{},\"capturing\":{},\"pointer\":{},\"menu\":{},\"region\":{},\"slots\":[{}]}}{}\n",
@@ -2130,7 +2165,12 @@ impl OutputHandler for App {
         if let Some(info) = self.output_state.info(&output) {
             if let Some(v) = self.views.iter_mut().find(|v| v.output == output) {
                 if let Some(ls) = info.logical_size {
-                    v.out_size = ls;
+                    if ls != v.out_size {
+                        v.out_size = ls;
+                        v.layout.max_w = ls.0 as f32;
+                        self.refresh_scheduled = false;
+                        self.refresh(); // recompute the surface for the new width
+                    }
                 }
             }
         }
@@ -2379,4 +2419,14 @@ impl ProvidesRegistryState for App {
         &mut self.registry_state
     }
     registry_handlers![OutputState, SeatState];
+}
+
+/// Icon texture side for a peak zoom: the magnified icon on a HiDPI monitor (up to 2x) must not
+/// be upscaled from a smaller texture. 256 px covers up to ~2.9x; beyond that 512 px.
+fn icon_px_for(zoom: f32) -> u32 {
+    if dock::ICON * zoom.max(1.0) * 2.0 <= 256.0 {
+        256
+    } else {
+        512
+    }
 }

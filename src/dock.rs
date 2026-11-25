@@ -102,6 +102,8 @@ pub struct Layout {
     pub magnify: bool,
     /// Hide when the pointer leaves (see `config::Settings::auto_hide`); false keeps it visible.
     pub auto_hide: bool,
+    /// Logical width of the monitor: the surface and the magnified dock never exceed it.
+    pub max_w: f32,
     pub drag: Option<DragState>,
     /// Visual offsets (logical px) of slots that just changed place; they decay to zero.
     pub shift: HashMap<String, f32>,
@@ -127,6 +129,7 @@ impl Layout {
             zoom: ZOOM,
             magnify: true,
             auto_hide: true,
+            max_w: f32::INFINITY,
             drag: None,
             shift: HashMap::new(),
         };
@@ -136,11 +139,14 @@ impl Layout {
 
     /// Peak icon scale in use: 1.0 when magnification is off.
     pub fn eff_zoom(&self) -> f32 {
-        if self.magnify {
-            self.zoom.max(1.0)
-        } else {
-            1.0
+        if !self.magnify {
+            return 1.0;
         }
+        // Never wider than the monitor: with many icons the peak zoom is reduced until the
+        // magnified dock (and its surface) still fits in `max_w`.
+        let room = self.max_w - 2.0 * SIDE_MARGIN - self.rest_total();
+        let cap = 1.0 + room.max(0.0) / (ICON * (ZOOM_RANGE / (ICON + GAP)) * 1.15);
+        self.zoom.max(1.0).min(cap.max(1.0))
     }
 
     pub fn rest_total(&self) -> f32 {
@@ -157,6 +163,9 @@ impl Layout {
         let extra = (z - 1.0) * ICON * (ZOOM_RANGE / (ICON + GAP)) * 1.15;
         let mut w = (self.rest_total() + extra).ceil() as i32 + 2 * SIDE_MARGIN as i32;
         w += w % 2;
+        if self.max_w.is_finite() {
+            w = w.min(self.max_w as i32 - (self.max_w as i32) % 2);
+        }
         let mut h = (z * ICON + PAD_TOP + PAD_BOTTOM + BOTTOM_GAP + LABEL_SPACE + 24.0).ceil() as i32;
         h += h % 2;
         let changed = (w as f32 - self.w).abs() > 0.5 || (h as f32 - self.h).abs() > 0.5;
@@ -359,28 +368,31 @@ impl Layout {
     }
 
     /// Input region `(x, y, w, h)` in logical surface px.
-    pub fn input_rect(&mut self) -> (i32, i32, i32, i32) {
+    /// Rectangles that take the pointer: the bottom hot strip, plus (once it shows) the panel
+    /// where it physically is right now. Two rects, not their bounding box, so the empty space
+    /// beside the panel above the (wider) hot strip does not count as dock.
+    pub fn input_rects(&mut self) -> Vec<(i32, i32, i32, i32)> {
         let h = self.h;
         let (left, total) = self.layout();
+        let hot_w = self.rest_total() + HOT_PAD;
+        let hot_x = self.w / 2.0 - hot_w / 2.0;
+        let hot = (hot_x as i32, (h - HOT_H) as i32, hot_w as i32, HOT_H as i32);
         if self.reveal < 0.02 {
-            let hot_w = (self.rest_total() + HOT_PAD) as i32;
-            return (
-                (self.w / 2.0 - hot_w as f32 / 2.0) as i32,
-                (h - HOT_H) as i32,
-                hot_w,
-                HOT_H as i32,
-            );
+            return vec![hot];
         }
-        let panel_bottom = h - BOTTOM_GAP;
-        let top = panel_bottom - PANEL_H;
+        // Only the panel's physical surface where it is NOW (it slides down while hiding),
+        // plus the bottom hot strip: pointing at the empty place the dock just left must not
+        // bring it back up, touching the dock itself or the bottom edge does.
+        let top = self.panel_geom().top;
         let lift = self
             .slots
             .iter()
             .filter(|s| s.interactive())
             .map(|s| s.w - if s.kind == Kind::App { ICON } else { ADD_BASE })
             .fold(0.0f32, f32::max);
-        let y0 = (top - lift - 6.0).max(0.0) as i32;
-        ((left - 6.0) as i32, y0, (total + 12.0) as i32, h as i32 - y0)
+        let y0 = (top - lift - 6.0).max(0.0).min(h - HOT_H);
+        let panel = ((left - 6.0) as i32, y0 as i32, (total + 12.0).ceil() as i32, (h - y0).ceil() as i32);
+        vec![panel, hot]
     }
 
     fn draggable_indices(&self) -> Vec<usize> {
@@ -607,7 +619,9 @@ mod tests {
     fn hidden_dock_only_exposes_a_thin_hot_zone() {
         let mut l = typical_layout();
         assert_eq!(l.reveal, 0.0);
-        let (x, y, w, h) = l.input_rect();
+        let r = l.input_rects();
+        assert_eq!(r.len(), 1, "hidden: only the hot strip");
+        let (x, y, w, h) = r[0];
         assert_eq!(h, HOT_H as i32);
         assert_eq!(y, (l.h - HOT_H) as i32);
         assert!(
@@ -615,6 +629,62 @@ mod tests {
             "the hot zone must be at least as wide as the resting dock"
         );
         assert!(x >= 0 && (x + w) as f32 <= l.w);
+    }
+
+    #[test]
+    fn while_hiding_only_the_sliding_panel_and_the_edge_take_the_pointer() {
+        let mut l = typical_layout();
+        let inside = |r: &[(i32, i32, i32, i32)], x: f32, y: f32| {
+            r.iter().any(|&(rx, ry, rw, rh)| x >= rx as f32 && x < (rx + rw) as f32 && y >= ry as f32 && y < (ry + rh) as f32)
+        };
+        l.reveal = 1.0;
+        let rest_top = l.rest_top();
+        // Halfway down: the place the panel's top just left is no longer part of the dock.
+        l.reveal = 0.5;
+        let r = l.input_rects();
+        let g = l.panel_geom();
+        assert!(g.top > rest_top + 10.0, "the panel did slide down");
+        assert!(!inside(&r, l.w / 2.0, rest_top + 2.0), "an empty spot where the dock was must not reveal it");
+        assert!(inside(&r, l.w / 2.0, g.top + 2.0), "the panel's current surface is still inside");
+        // Beside the panel (above the wider hot strip) is empty space too.
+        assert!(!inside(&r, g.left - 20.0, g.top + 2.0), "empty space beside the panel must not count");
+        // The bottom hot strip (the gesture that shows the dock) is always included.
+        let hot_w = l.rest_total() + HOT_PAD;
+        assert!(inside(&r, l.w / 2.0 - hot_w / 2.0 + 2.0, l.h - 1.0));
+        assert!(inside(&r, l.w / 2.0 + hot_w / 2.0 - 2.0, l.h - 1.0));
+    }
+
+    #[test]
+    fn zoom_is_capped_so_the_dock_fits_the_monitor() {
+        let mut l = typical_layout();
+        while l.slots.len() < 24 {
+            let mut s = l.slots[0].clone();
+            s.key = format!("extra{}", l.slots.len());
+            l.slots.insert(1, s);
+        }
+        l.zoom = crate::config::ZOOM_MAX;
+        l.max_w = 1600.0;
+        l.resize_for_slots();
+        assert!(l.w <= 1600.0, "surface {} wider than the monitor", l.w);
+        assert!(l.eff_zoom() < crate::config::ZOOM_MAX);
+        // Peak magnification under the pointer still fits.
+        let t0 = Instant::now();
+        l.reveal = 1.0;
+        for i in 0..200u64 {
+            l.pointer = Some((l.w * (i as f32 % 40.0) / 40.0, l.h - 20.0));
+            l.step(1.0 / 60.0, t0 + Duration::from_millis(i * 16), false, false);
+            let (left, total) = l.layout();
+            assert!(left >= 0.0 && left + total <= l.w + 0.5, "magnified dock {left}+{total} > {}", l.w);
+        }
+    }
+
+    #[test]
+    fn zoom_up_to_five_fits_the_surface() {
+        let mut l = typical_layout();
+        l.zoom = crate::config::ZOOM_MAX;
+        assert!(crate::config::ZOOM_MAX >= 5.0);
+        l.resize_for_slots();
+        assert!(l.h >= 5.0 * ICON + PANEL_H, "room for a 5x icon above the panel");
     }
 
     #[test]
