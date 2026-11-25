@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub const ZOOM_MIN: f32 = 1.25;
-pub const ZOOM_MAX: f32 = 2.0;
+pub const ZOOM_MAX: f32 = 3.0;
 pub const ZOOM_DEFAULT: f32 = 1.78;
 pub const RECOMMENDED_MIN: u32 = 1;
 pub const RECOMMENDED_MAX: u32 = 5;

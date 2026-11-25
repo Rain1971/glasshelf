@@ -856,6 +856,8 @@ pub struct MonitorInfo {
     pub focused: bool,
     pub active_workspace_id: i32,
     pub active_workspace_name: String,
+    /// Special workspace (scratchpad) shown over the active one; 0 when none is open.
+    pub special_workspace_id: i32,
 }
 
 impl MonitorInfo {
@@ -973,6 +975,7 @@ pub fn parse_monitors(v: &Value) -> Vec<MonitorInfo> {
                 focused: jbool(m, "focused"),
                 active_workspace_id: aw.map_or(0, |w| ji32(w, "id", 0)),
                 active_workspace_name: aw.map(|w| jstr(w, "name")).unwrap_or_default(),
+                special_workspace_id: m.get("specialWorkspace").map_or(0, |w| ji32(w, "id", 0)),
             }
         })
         .collect()
@@ -1122,7 +1125,7 @@ impl Hypr {
 
 // Events
 
-pub const RELEVANT_EVENTS: [&str; 14] = [
+pub const RELEVANT_EVENTS: [&str; 16] = [
     "openwindow",
     "closewindow",
     "activewindow",
@@ -1137,6 +1140,9 @@ pub const RELEVANT_EVENTS: [&str; 14] = [
     "monitoradded",
     "monitorremoved",
     "configreloaded",
+    // the special workspace (scratchpad) is shown or hidden on a monitor
+    "activespecial",
+    "activespecialv2",
 ];
 
 const MAX_PARTIAL_LINE: usize = 256 * 1024;
@@ -2189,7 +2195,7 @@ Exec=x
         assert!(parse_clients(&Value::Null).is_empty());
         assert!(parse_clients(&serde_json::json!({"a": 1})).is_empty());
         let mons: Value = serde_json::from_str(
-            r#"[{"id":0,"name":"eDP-1","width":2560,"height":1600,"x":0,"y":0,"scale":1.60,"focused":true,"activeWorkspace":{"id":1,"name":"1"}},
+            r#"[{"id":0,"name":"eDP-1","width":2560,"height":1600,"x":0,"y":0,"scale":1.60,"focused":true,"activeWorkspace":{"id":1,"name":"1"},"specialWorkspace":{"id":-98,"name":"special:magic"}},
                 {"id":1,"name":"off","disabled":true}, {"name":"odd","scale":0}]"#,
         )
         .unwrap();
@@ -2200,6 +2206,7 @@ Exec=x
             (m[0].active_workspace_id, m[0].active_workspace_name.as_str()),
             (1, "1")
         );
+        assert_eq!((m[0].special_workspace_id, m[1].special_workspace_id), (-98, 0));
         assert_eq!(m[1].scale, 1.0);
         assert!(is_valid_address("0x5af195a78f70"));
         assert!(!is_valid_address("0x"));
