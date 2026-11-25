@@ -550,6 +550,9 @@ impl App {
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         let mut layout = Layout::new();
         self.rebuild_slots_for(&mut layout);
+        // Without this a dock that starts on an empty desktop stays hidden until the next event.
+        let mons = self.hypr.as_ref().map(|h| h.monitors()).unwrap_or_default();
+        layout.forced_visible = self.monitor_is_empty(&mons, &name);
         layout.resize_for_slots();
         layer.set_size(layout.w as u32, layout.h as u32);
         let id = self.view_serial;
@@ -842,12 +845,7 @@ impl App {
         for vi in 0..self.views.len() {
             let mut layout = std::mem::replace(&mut self.views[vi].layout, Layout::new());
             self.rebuild_slots_for(&mut layout);
-            let name = self.views[vi].name.clone();
-            let empty = match (&self.hypr, mons.iter().find(|m| m.name == name)) {
-                (Some(h), Some(m)) => h.workspace_window_count(m.active_workspace_id) == 0,
-                _ => false,
-            };
-            layout.forced_visible = empty;
+            layout.forced_visible = self.monitor_is_empty(&mons, &self.views[vi].name);
             let changed = layout.resize_for_slots();
             let v = &mut self.views[vi];
             v.layout = layout;
@@ -860,6 +858,18 @@ impl App {
         self.sync_icons();
         for vi in 0..self.views.len() {
             self.request_redraw(vi);
+        }
+    }
+
+    /// The monitor shows no window: its active workspace is empty and so is the special
+    /// workspace (scratchpad) shown on top of it, if any. The dock stays visible there.
+    fn monitor_is_empty(&self, mons: &[model::MonitorInfo], name: &str) -> bool {
+        match (&self.hypr, mons.iter().find(|m| m.name == name)) {
+            (Some(h), Some(m)) => {
+                h.workspace_window_count(m.active_workspace_id) == 0
+                    && (m.special_workspace_id == 0 || h.workspace_window_count(m.special_workspace_id) == 0)
+            }
+            _ => false,
         }
     }
 
